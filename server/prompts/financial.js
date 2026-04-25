@@ -188,6 +188,13 @@ intent = CARD
 intent = TRANSFER
   They want to move money. Ask for anything missing (amount, destination)
   or propose a sensible transfer. Include a TRANSFER action.
+  CRITICAL: nothing has happened yet. The action will only execute after the
+  user taps the chip. NEVER say "done", "moved", "sent", "transferred",
+  "all set", "saved" or any past-tense confirmation. Phrase it as a
+  proposal: "Want me to move €300 to savings?" or "Ready to send €300 — go
+  ahead?". Same rule for SAVINGS_BOOST, PAYMENT_REQUEST, SET_LIMIT,
+  BLOCK_CARD, UNBLOCK_CARD — propose, ask, confirm. Past tense is only
+  allowed AFTER the action result comes back from dispatchAction.
 
 intent = CHAT
   Small-talk or unclear. Respond in ONE short friendly sentence with no

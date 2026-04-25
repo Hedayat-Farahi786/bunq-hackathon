@@ -242,7 +242,7 @@ aiRouter.post('/speak', async (req, res, next) => {
       // in every browser without WebAudio juggling. ElevenLabs' streaming
       // endpoint emits frame-by-frame so the audio element can start playing
       // long before the file completes.
-      const output = 'mp3_22050_32'
+      const output = 'mp3_44100_128'
       const url = `https://api.elevenlabs.io/v1/text-to-speech/${voice}/stream` +
                   `?optimize_streaming_latency=4&output_format=${output}`
 
@@ -350,10 +350,35 @@ aiRouter.post('/speak', async (req, res, next) => {
     const b64 = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data
     if (!b64) return res.status(500).json({ error: 'No audio in response' })
 
-    const audio = Buffer.from(b64, 'base64')
+    // Gemini returns raw PCM (24 kHz, 16-bit, mono) without any container.
+    // Wrap it in a minimal WAV header so the browser's decodeAudioData /
+    // <audio> element can actually play it. Without this header, every
+    // client just gets a wall of bytes that decode to nothing.
+    const pcm = Buffer.from(b64, 'base64')
+    const sampleRate = 24000
+    const numChannels = 1
+    const bitsPerSample = 16
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8)
+    const blockAlign = numChannels * (bitsPerSample / 8)
+    const header = Buffer.alloc(44)
+    header.write('RIFF', 0)
+    header.writeUInt32LE(36 + pcm.length, 4)
+    header.write('WAVE', 8)
+    header.write('fmt ', 12)
+    header.writeUInt32LE(16, 16)              // PCM chunk size
+    header.writeUInt16LE(1, 20)               // PCM format
+    header.writeUInt16LE(numChannels, 22)
+    header.writeUInt32LE(sampleRate, 24)
+    header.writeUInt32LE(byteRate, 28)
+    header.writeUInt16LE(blockAlign, 32)
+    header.writeUInt16LE(bitsPerSample, 34)
+    header.write('data', 36)
+    header.writeUInt32LE(pcm.length, 40)
+    const wav = Buffer.concat([header, pcm])
+
     res.set('Content-Type', 'audio/wav')
-    res.set('Content-Length', audio.length)
-    res.send(audio)
+    res.set('Content-Length', wav.length)
+    res.send(wav)
   } catch (err) {
     next(err)
   }

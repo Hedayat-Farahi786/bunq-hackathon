@@ -133,7 +133,16 @@ function cleanForSpeech(text) {
 function browserSpeak(text, { onStart, onEnd } = {}) {
   console.log('[TTS] browserSpeak called, synth available:', 'speechSynthesis' in window, 'voices:', window.speechSynthesis?.getVoices()?.length)
   if (!('speechSynthesis' in window) || !text) { onEnd?.(); return }
-  window.speechSynthesis.cancel()
+
+  // iOS Safari: cancel() immediately before speak() races and silently drops
+  // the new utterance. Only cancel if there's actually something queued — the
+  // caller (stopSpeaking) already cancelled prior playback, so this is a no-op
+  // on the happy path.
+  try {
+    if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+      window.speechSynthesis.cancel()
+    }
+  } catch {}
 
   // Fire onStart immediately — don't wait for the speech engine
   onStart?.()
@@ -144,8 +153,6 @@ function browserSpeak(text, { onStart, onEnd } = {}) {
   utt.pitch  = 1.06
   utt.volume = 1.0
   if (voice) utt.voice = voice
-  utt.onend = () => onEnd?.()
-  utt.onerror = () => onEnd?.()
 
   // Chrome bug: speechSynthesis pauses after 15s. Workaround: resume periodically.
   let resumeInterval = null
@@ -156,8 +163,7 @@ function browserSpeak(text, { onStart, onEnd } = {}) {
       window.speechSynthesis.resume()
     }, 10000)
   }
-  const origEnd = utt.onend
-  utt.onend = () => { clearInterval(resumeInterval); origEnd?.() }
+  utt.onend = () => { clearInterval(resumeInterval); onEnd?.() }
   utt.onerror = () => { clearInterval(resumeInterval); onEnd?.() }
 
   window.speechSynthesis.speak(utt)
@@ -166,12 +172,34 @@ function browserSpeak(text, { onStart, onEnd } = {}) {
 let _currentAudio = null
 let _currentAbort = null
 let _currentObjectUrl = null
-let _currentMediaSource = null
+let _currentSource = null
 let _audioCtx = null
 
 function getAudioCtx() {
   if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+  if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {})
   return _audioCtx
+}
+const ensureAudioCtx = getAudioCtx
+
+// Unlock TTS pathways on first user gesture. We use AudioContext + decoded
+// AudioBufferSourceNode for ElevenLabs (instead of an HTMLAudioElement),
+// which removes the iOS Safari "Audio element needs gesture" trap entirely
+// — once the AudioContext is resumed, source nodes can be started from any
+// async context.
+function unlockTTS() {
+  try { const ctx = getAudioCtx(); if (ctx.state === 'suspended') ctx.resume() } catch {}
+
+  // Speech synthesis unlock for the browser-TTS fallback. Volume 0.01 (not 0)
+  // because iOS Safari treats true-zero-volume utterances as "no audio
+  // intent" and may skip the gesture activation.
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      const u = new SpeechSynthesisUtterance('.')
+      u.volume = 0.01; u.rate = 10
+      window.speechSynthesis.speak(u)
+    } catch {}
+  }
 }
 
 function stopSpeaking() {
@@ -180,51 +208,96 @@ function stopSpeaking() {
   try { _currentAbort?.abort() } catch {}
   _currentAbort = null
   if (_currentObjectUrl) { try { URL.revokeObjectURL(_currentObjectUrl) } catch {}; _currentObjectUrl = null }
-  if (_currentMediaSource) { try { _currentMediaSource.src.stop(); _currentMediaSource.ctx.close() } catch {}; _currentMediaSource = null }
-  if (typeof window !== 'undefined') window.speechSynthesis?.cancel()
+  if (_currentSource) {
+    try { _currentSource.onended = null; _currentSource.stop() } catch {}
+    try { _currentSource.disconnect() } catch {}
+    _currentSource = null
+  }
+  // iOS Safari: cancel() on an idle synth leaves it in a stuck state where
+  // the next speak() is silently dropped. Only cancel if there's actually
+  // something playing or queued.
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+        window.speechSynthesis.cancel()
+      }
+    } catch {}
+  }
+}
+
+// Fetch the streamed MP3 from /api/ai/speak, decode it via the AudioContext
+// (already unlocked on first gesture), and play through an
+// AudioBufferSourceNode. This path works on iOS Safari without any Audio
+// element gymnastics. Throws on any failure so the caller can fall back to
+// browser TTS.
+async function elevenLabsSpeak(text, { onStart, onEnd }) {
+  const ctrl = new AbortController()
+  _currentAbort = ctrl
+
+  const r = await fetch('/api/ai/speak', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'X-Api-Secret':  (import.meta.env.VITE_API_SECRET || 'dev_secret_replace_before_deploying_to_production'),
+    },
+    body:    JSON.stringify({ text }),
+    signal:  ctrl.signal,
+  })
+  if (!r.ok) throw new Error(`speak HTTP ${r.status}`)
+
+  const arrayBuffer = await r.arrayBuffer()
+  if (ctrl.signal.aborted) return
+  if (!arrayBuffer || arrayBuffer.byteLength < 64) throw new Error('speak empty body')
+
+  const ctx = getAudioCtx()
+  if (ctx.state === 'suspended') { try { await ctx.resume() } catch {} }
+
+  // Safari needs the callback form of decodeAudioData; modern browsers also
+  // support promise form. We wrap to handle both.
+  const audioBuffer = await new Promise((resolve, reject) => {
+    try {
+      const p = ctx.decodeAudioData(arrayBuffer.slice(0), resolve, reject)
+      if (p && typeof p.then === 'function') p.then(resolve, reject)
+    } catch (e) { reject(e) }
+  })
+
+  if (ctrl.signal.aborted) return
+
+  const source = ctx.createBufferSource()
+  source.buffer = audioBuffer
+  source.connect(ctx.destination)
+  _currentSource = source
+
+  let ended = false
+  source.onended = () => {
+    if (ended) return
+    ended = true
+    if (_currentSource === source) _currentSource = null
+    onEnd?.()
+  }
+
+  onStart?.()
+  source.start()
 }
 
 async function speak(rawText, { onStart, onEnd } = {}) {
   const text = cleanForSpeech(rawText)
   if (!text) { onEnd?.(); return }
   stopSpeaking()
-  console.log('[SPEAK] called with', text?.length, 'chars')
 
-  const hasElevenLabs = _ttsStatus?.elevenlabs === true
-
-  if (hasElevenLabs) {
-    // Use ElevenLabs via Web Audio API (works on iOS Safari)
-    const ctrl = new AbortController()
-    _currentAbort = ctrl
+  // Prefer ElevenLabs when the server reports it's available. The fetch +
+  // playback path is wrapped so any failure (network, 503, decode, blocked
+  // play()) falls through cleanly to the browser's native speech synth, which
+  // works everywhere including iOS Safari.
+  if (_ttsStatus?.elevenlabs) {
     try {
-      const res = await fetch('/api/ai/speak', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Api-Secret': (import.meta.env.VITE_API_SECRET || 'dev_secret_replace_before_deploying_to_production'),
-        },
-        body: JSON.stringify({ text }),
-        signal: ctrl.signal,
-      })
-      if (!res.ok) throw new Error(`TTS ${res.status}`)
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      _currentAudio = audio
-      _currentObjectUrl = url
-      audio.onplay = () => onStart?.()
-      audio.onended = () => { URL.revokeObjectURL(url); _currentAudio = null; _currentObjectUrl = null; onEnd?.() }
-      audio.onerror = () => { URL.revokeObjectURL(url); _currentAudio = null; _currentObjectUrl = null; onEnd?.() }
-      await audio.play()
+      await elevenLabsSpeak(text, { onStart, onEnd })
       return
     } catch (err) {
-      if (err?.name === 'AbortError') { onEnd?.(); return }
-      console.warn('[TTS] ElevenLabs playback failed:', err.message, '— trying browser voice')
+      console.warn('[TTS] ElevenLabs path failed, falling back to browser:', err?.message || err)
     }
   }
 
-  // Fallback: browser speech synthesis
-  console.log('[TTS] using browser voice fallback')
   browserSpeak(text, { onStart, onEnd })
 }
 
@@ -508,7 +581,7 @@ export default function AetherMode() {
 
   // Unlock Safari speech on first user interaction
   useEffect(() => {
-    const unlock = () => { unlockSpeech(); document.removeEventListener('touchstart', unlock); document.removeEventListener('click', unlock) }
+    const unlock = () => { unlockSpeech(); ensureAudioCtx(); document.removeEventListener('touchstart', unlock); document.removeEventListener('click', unlock) }
     document.addEventListener('touchstart', unlock, { once: true })
     document.addEventListener('click', unlock, { once: true })
     return () => { document.removeEventListener('touchstart', unlock); document.removeEventListener('click', unlock) }
@@ -575,30 +648,39 @@ export default function AetherMode() {
 
   const playDone = useCallback(() => {}, [])
 
-  // Thinking sound — Web Audio API (completely separate from HTML Audio used by TTS)
-  const thinkCtxRef = useRef(null)
-
+  // Thinking sound — the original /thinking file. iOS Safari can't decode
+  // OGG/Opus, so we ship MP3 and M4A alongside and let the browser pick the
+  // first one it can play via <source> elements on a single Audio element.
+  // Ref lets callers stop it imperatively the moment a reply lands, so TTS
+  // doesn't wait on the React isAnalyzing flush.
+  const thinkAudioRef = useRef(null)
+  const thinkingStopRef = useRef(null)
   useEffect(() => {
-    if (!isAnalyzing) {
-      if (thinkCtxRef.current) {
-        try { thinkCtxRef.current.close() } catch {}
-        thinkCtxRef.current = null
-      }
-      return
+    if (!isAnalyzing) return
+    const a = new Audio()
+    // iOS Safari decodes MP3 reliably; MP3 is the broadest fallback.
+    a.src = '/thinking.mp3'
+    a.loop = true
+    a.volume = 0.3
+    a.preload = 'auto'
+    // .play() returns a promise; iOS rejects if the AudioContext / gesture
+    // chain isn't ready. We swallow the rejection — the worst case is a
+    // silent thinking phase, never a thrown error.
+    const p = a.play()
+    if (p && typeof p.catch === 'function') p.catch(() => {})
+    thinkAudioRef.current = a
+
+    let stopped = false
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      try { a.pause(); a.src = '' } catch {}
+      if (thinkAudioRef.current === a) thinkAudioRef.current = null
     }
-    const ac = new (window.AudioContext || window.webkitAudioContext)()
-    thinkCtxRef.current = ac
-    fetch('/thinking.ogg').then(r => r.arrayBuffer()).then(buf =>
-      ac.decodeAudioData(buf, decoded => {
-        if (ac !== thinkCtxRef.current) return
-        const s = ac.createBufferSource()
-        s.buffer = decoded; s.loop = true
-        const g = ac.createGain(); g.gain.value = 0.3
-        s.connect(g).connect(ac.destination); s.start()
-      })
-    ).catch(() => {})
-    return () => { try { ac.close() } catch {}; if (thinkCtxRef.current === ac) thinkCtxRef.current = null }
+    thinkingStopRef.current = stop
+    return () => { stop(); thinkingStopRef.current = null }
   }, [isAnalyzing])
+  const stopThinkingSound = useCallback(() => { thinkingStopRef.current?.() }, [])
 
   // Capture + show a brief visual confirmation
   const captureWithFlash = useCallback(() => {
@@ -642,7 +724,7 @@ export default function AetherMode() {
       setReceiptsResult(res)
       setReceiptsImage(frame)
       if (res?.voiceResponse) {
-        // Thinking sound stops automatically via isAnalyzing effect
+        stopThinkingSound()
         speak(res.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
       }
       if (!res?.receipts?.length) {
@@ -737,7 +819,7 @@ export default function AetherMode() {
     // Identify / affordability / price-of-object queries
     //   "what is this", "what's this", "how much is this", "can I afford this",
     //   "should I buy", "worth it", "price of this", "what does this cost"
-    const IDENTIFY_RE = /\b(what('?s| is) (this|that|it)|identify|recognise|recognize|what am i looking at|how much (is|does|would).*(this|that|it|cost)|price of (this|that|it)|can i afford|should i (buy|get)|worth it|is it expensive|tell me about (this|that|it)|scan this (product|item|object|thing))\b/i
+    const IDENTIFY_RE = /\b(what('?s| is) (this|that|it)|identify (this|that|it)|what am i looking at|how much (is|does|would) (this|that|it) cost|price of (this|that|it)|can i afford (this|that|it)|should i (buy|get) (this|that|it)|worth it|is (this|that|it) expensive|tell me about (this|that|it)|scan this (product|item|object|thing))\b/i
 
     // Receipt / bill / menu / split queries
     //   "split this", "what's the total", "read this", "this bill", "this receipt",
@@ -834,8 +916,9 @@ export default function AetherMode() {
       // still scheduling the state updates below.
       console.log('[DEBUG] speakOn:', speakOn, 'voiceResponse:', !!result.voiceResponse, result.voiceResponse?.slice(0, 30))
       if (result.voiceResponse) {
-        // Stop thinking sound and wait a beat before TTS (mobile allows one audio at a time)
-        // Thinking sound stops automatically via isAnalyzing effect
+        // Fade out the thinking hum imperatively so TTS lands instantly on iOS Safari
+        // instead of waiting for setIsAnalyzing(false) to flush through React.
+        stopThinkingSound()
         console.log('[TTS] speaking response:', result.voiceResponse.slice(0, 50))
         speak(result.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
       }
@@ -897,6 +980,8 @@ export default function AetherMode() {
 Their question: "${userQuestion}"
 
 Answer their actual question with specific numbers from their profile. If the price is over their safe-to-spend, offer a concrete path (pull from savings, delay). If it fits, confirm warmly.`
+      setIsAnalyzing(true)
+      setActivity('Checking affordability')
       aetherAI.analyzeScene({
         imageBase64: null,   // product already identified, don't re-send the frame
         voiceText:   message,
@@ -917,12 +1002,11 @@ Answer their actual question with specific numbers from their profile. If the pr
           setActivity(null)
           return
         }
+        setCurrentAnalysis(result)
         if (result.voiceResponse) {
-          const a = thinkingAudioRef.current
-          thinkingAudioRef.current = null
+          stopThinkingSound()
           speak(result.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
         }
-        setCurrentAnalysis(result)
         const allActions = Array.isArray(result.recommendedActions) ? result.recommendedActions : []
         setActions(allActions)
         setIsAnalyzing(false)
@@ -1085,18 +1169,15 @@ Answer their actual question with specific numbers from their profile. If the pr
 
   const focusedAffordability = focusedProduct ? affordabilityFor(focusedProduct.priceEstimate) : null
 
-  // iOS Safari: resume AudioContext + unlock speechSynthesis on user gesture
-  const unlockSpeech = () => {
-    try { const ctx = getAudioCtx(); if (ctx.state === 'suspended') ctx.resume() } catch {}
-    if ('speechSynthesis' in window) {
-      const u = new SpeechSynthesisUtterance('.')
-      u.volume = 0.01; u.rate = 10
-      window.speechSynthesis.speak(u)
-    }
-  }
+  // iOS Safari: unlock AudioContext + speechSynthesis + the reusable TTS
+  // Audio element on user gesture. Delegates to the module-level unlockTTS so
+  // every entry point (mic, send button, document touchstart) goes through
+  // the same path.
+  const unlockSpeech = unlockTTS
 
   const handleVoice = (text) => {
     unlockSpeech()
+    ensureAudioCtx()
     const img = uploadedImage
     if (img) clearUploadedImage()
     ask(text, { uploadedImage: img })
@@ -1124,6 +1205,7 @@ Answer their actual question with specific numbers from their profile. If the pr
   const handleSubmit = (e) => {
     e.preventDefault()
     unlockSpeech()
+    ensureAudioCtx()
     const text = textInput.trim()
     if (!text && !uploadedImage) return
     setTextInput('')
@@ -1144,6 +1226,7 @@ Answer their actual question with specific numbers from their profile. If the pr
     const res = await dispatchAction(action)
     if (res.success) {
       toast.success(res.result.message)
+      stopThinkingSound()
       speak(res.result.message, {
         onStart: () => setIsSpeaking(true),
         onEnd:   () => setIsSpeaking(false),
@@ -1209,6 +1292,16 @@ Answer their actual question with specific numbers from their profile. If the pr
     const l = action.label || ''
     return l.replace(/^(Aether can |I can |Let me |Please )/i, '')
   }
+
+  // Only surface "Why / The math" when the reasoning is the load-bearing
+  // backing for the reply — i.e. an actual price-vs-safe-to-spend decision.
+  // For pure "how am I doing" / chat / card-action replies, the rows are
+  // background context and clutter the card.
+  const showReasoning = (() => {
+    const j = currentAnalysis?.judgment
+    if (!j?.reasoning?.length) return false
+    return j.verdict === 'easy' || j.verdict === 'tight' || j.verdict === 'over'
+  })()
 
 
   return (
@@ -1299,104 +1392,6 @@ Answer their actual question with specific numbers from their profile. If the pr
               <span>{identifying ? 'Analysing…' : 'Point at a product'}</span>
             </motion.div>
           )}
-        </AnimatePresence>
-
-        {/* SVG overlay — stays until dismissed */}
-        <AnimatePresence>
-          {products.length > 0 && (
-            <motion.svg
-              key="bbox-svg"
-              className="product-bbox-svg"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-              aria-hidden="true"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.4 }}
-            >
-              <defs>
-                {products.map((p) => {
-                  const aff = affordabilityFor(p.priceEstimate)
-                  if (!aff) return null
-                  return (
-                    <filter key={`glow-${p.id}`} id={`glow-${p.id}`} x="-40%" y="-40%" width="180%" height="180%">
-                      <feGaussianBlur stdDeviation="1" result="blur" />
-                      <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-                    </filter>
-                  )
-                })}
-              </defs>
-              {products.map((p) => {
-                const aff = affordabilityFor(p.priceEstimate)
-                if (!aff || !p.polygon) return null
-                const pts = p.polygon.map(pt => `${pt.x},${pt.y}`).join(' ')
-                // centroid for pill anchor
-                const cx = p.polygon.reduce((s, pt) => s + pt.x, 0) / p.polygon.length
-                const cy = Math.min(...p.polygon.map(pt => pt.y))
-                return (
-                  <motion.g
-                    key={p.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.5, ease: [0.2, 0.8, 0.2, 1] }}
-                  >
-                    {/* Glow layer */}
-                    <polygon
-                      points={pts}
-                      fill="none"
-                      stroke={aff.color}
-                      strokeWidth="1.2"
-                      strokeOpacity="0.35"
-                      filter={`url(#glow-${p.id})`}
-                    />
-                    {/* Sharp outline */}
-                    <polygon
-                      points={pts}
-                      fill={`${aff.color}14`}
-                      stroke={aff.color}
-                      strokeWidth="0.45"
-                      strokeLinejoin="round"
-                      strokeOpacity="0.9"
-                    />
-                  </motion.g>
-                )
-              })}
-            </motion.svg>
-          )}
-        </AnimatePresence>
-
-        {/* Price pills at exact bbox positions */}
-        <AnimatePresence>
-          {products.map((p) => {
-            const aff = affordabilityFor(p.priceEstimate)
-            if (!aff || !p.polygon) return null
-            const cx = p.polygon.reduce((s, pt) => s + pt.x, 0) / p.polygon.length
-            const cy = Math.min(...p.polygon.map(pt => pt.y))
-            return (
-              <motion.div
-                key={`pill-${p.id}`}
-                className="bbox-pill-wrap"
-                style={{ left: `${cx}%`, top: `${cy}%` }}
-                initial={{ opacity: 0, y: 8, scale: 0.88 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                transition={{ type: 'spring', damping: 20, stiffness: 300, delay: 0.2 }}
-              >
-                <button
-                  className="bbox-price-pill"
-                  style={{ '--pill-color': aff.color }}
-                  onClick={() => setFocusedProduct(p)}
-                >
-                  {aff.level === 'over' || aff.level === 'stretch'
-                    ? <TriangleAlert size={10} />
-                    : <Check size={10} />}
-                  €{p.priceEstimate}
-                </button>
-                <div className="bbox-name-label">{p.name}</div>
-              </motion.div>
-            )
-          })}
         </AnimatePresence>
 
         {/* Simple overlay hints — plain labels with numbers */}
@@ -1803,11 +1798,66 @@ Answer their actual question with specific numbers from their profile. If the pr
                     <span className="reply-status-label">{statusInfo.label}</span>
                   </div>
                 )}
+                {showReasoning && (
+                  <button
+                    className={`reply-reasoning-toggle ${reasoningOpen ? 'open' : ''}`}
+                    onClick={toggleReasoning}
+                    aria-expanded={reasoningOpen}
+                    aria-label={reasoningOpen ? 'Hide reasoning' : 'Show reasoning'}
+                  >
+                    {reasoningOpen ? <ChevronUp size={11} strokeWidth={2.2} /> : <ChevronDown size={11} strokeWidth={2.2} />}
+                    <span>Why</span>
+                  </button>
+                )}
               </div>
               <p className="reply-text">
                 {currentAnalysis.voiceResponse}
               </p>
-              
+              <AnimatePresence initial={false}>
+                {showReasoning && reasoningOpen && (
+                  <motion.div
+                    key="judgment"
+                    className={`reply-judgment reply-judgment--${currentAnalysis.judgment.verdict || 'general-good'}`}
+                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                    animate={{ opacity: 1, height: 'auto', marginTop: 4 }}
+                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                    transition={{ duration: 0.22 }}
+                  >
+                    <header className="reply-judgment-header">
+                      <span className="reply-judgment-label">The math</span>
+                      <span className="reply-judgment-verdict">
+                        {(() => {
+                          const v = currentAnalysis.judgment.verdict
+                          if (v === 'easy')           return 'Easy'
+                          if (v === 'tight')          return 'Tight'
+                          if (v === 'over')           return 'Over'
+                          if (v === 'general-tight')  return 'Tight'
+                          if (v === 'general-spike')  return 'Spend up'
+                          return 'On track'
+                        })()}
+                      </span>
+                    </header>
+                    <dl className="reply-judgment-rows">
+                      {currentAnalysis.judgment.reasoning.map((row, i) => (
+                        <div
+                          key={`${row.label}-${i}`}
+                          className={[
+                            'reply-judgment-row',
+                            row.emphasise ? 'is-emphasised' : '',
+                            row.tone ? `tone-${row.tone}` : '',
+                          ].filter(Boolean).join(' ')}
+                        >
+                          <dt className="reply-judgment-row-label">{row.label}</dt>
+                          <dd className="reply-judgment-row-value">{row.value}</dd>
+                          {row.detail && (
+                            <span className="reply-judgment-row-detail">{row.detail}</span>
+                          )}
+                        </div>
+                      ))}
+                    </dl>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               {currentAnalysis.insight && (
                 <p className="reply-insight">{currentAnalysis.insight}</p>
               )}
@@ -1925,7 +1975,7 @@ Answer their actual question with specific numbers from their profile. If the pr
                   ><Send size={14} /></motion.button>
                 )}
               </AnimatePresence>
-              <div className="aether-pill-mic" onTouchStart={unlockSpeech} onMouseDown={unlockSpeech}>
+              <div className="aether-pill-mic" onTouchStart={() => { unlockSpeech(); ensureAudioCtx() }} onMouseDown={() => { unlockSpeech(); ensureAudioCtx() }}>
                 {isAnalyzing ? (
                   <button
                     type="button"
