@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="100%" height="100%">
+  <defs>
+    <clipPath id="aiStarClip">
+      <path d="M 60 0 Q 60 60 120 60 Q 60 60 60 120 Q 60 60 0 60 Q 60 60 60 0 Z" />
+    </clipPath>
+    <linearGradient id="starGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"    stop-color="#5BBF4A" />
+      <stop offset="20%"   stop-color="#34B8C0" />
+      <stop offset="45%"   stop-color="#2672B9" />
+      <stop offset="65%"   stop-color="#C0272D" />
+      <stop offset="82%"   stop-color="#F47920" />
+      <stop offset="100%"  stop-color="#FDB813" />
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#aiStarClip)">
+    <rect x="0" y="0" width="120" height="120" fill="url(#starGrad)" />
+  </g>
+</svg>

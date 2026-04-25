@@ -1,0 +1,43 @@
+{
+  "name": "bunq-aether",
+  "version": "1.0.0",
+  "description": "bunq Aether - Multimodal Autonomous Financial Guardian Agent",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "server": "node --import ./server/env.js --watch server/index.js",
+    "dev:full": "concurrently -n web,api -c blue,magenta \"npm run dev\" \"npm run server\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server.js",
+    "start:api": "node --import ./server/env.js server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "clsx": "^2.1.1",
+    "cors": "^2.8.5",
+    "date-fns": "^4.1.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "framer-motion": "^11.13.1",
+    "helmet": "^8.0.0",
+    "http-proxy-middleware": "^3.0.3",
+    "lucide-react": "^0.468.0",
+    "mysql2": "^3.22.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.28.0",
+    "recharts": "^2.14.1",
+    "undici": "^8.1.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.1.2",
+    "vite": "^6.4.2"
+  }
+}

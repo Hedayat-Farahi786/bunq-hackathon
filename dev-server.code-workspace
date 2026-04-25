@@ -1,0 +1,19 @@
+{
+  "folders": [
+    {
+      "name": "Development Server",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "workbench.startupEditor": "readme",
+    "markdown.preview.openMarkdownLinks": "inEditor",
+    "markdown.preview.scrollPreviewWithEditor": true,
+    "workbench.editorAssociations": {
+      "**/README.md": "vscode.markdown.preview.editor"
+    }
+  },
+  "extensions": {
+    "recommendations": []
+  }
+}
