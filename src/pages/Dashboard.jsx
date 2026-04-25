@@ -18,7 +18,7 @@ import toast from 'react-hot-toast'
 import { format, isToday, isYesterday } from 'date-fns'
 import { ResponsiveContainer, AreaChart, Area, Tooltip as RTooltip } from 'recharts'
 
-const FALLBACK_COLORS = ['#2DD4BF', '#A78BFA', '#F59E0B', '#F472B6', '#60A5FA', '#34D399']
+const FALLBACK_COLORS = ['#ff7819', '#8b5cf6', '#34d399', '#d156dd', '#3db8ad', '#f59e0b']
 
 function txDate(date) {
   const d = new Date(date)
@@ -80,7 +80,30 @@ export default function Dashboard() {
   const firstName = user?.name?.split(' ')[0] ?? '—'
 
   const handleVoice = async (text) => {
-    setLiveTranscript('')     // transcript → analyzing state
+    const t = text.toLowerCase()
+    // Camera-related requests → redirect to Aether
+    const needsCamera = /\b(scan|receipt|identify|what is this|what's this|look at|camera|photo|picture|show|point|product|item|barcode)\b/.test(t)
+    if (needsCamera) {
+      toast('Opening Aether for that…', { icon: '✦', duration: 1500 })
+      navigate('/aether')
+      return
+    }
+    // Pay/transfer requests → open pay form
+    if (/\b(pay|send|transfer)\b/.test(t) && /\b(\d+|money|euros?|€)\b/.test(t)) {
+      setShowPayForm(true)
+      return
+    }
+    // Request/split → open request form
+    if (/\b(request|split|owe)\b/.test(t)) {
+      setShowRequestForm(true)
+      return
+    }
+    // Freeze/unfreeze
+    if (/\b(freeze|block|lock)\b/.test(t)) { handleBlockCard(); return }
+    if (/\b(unfreeze|unblock|unlock)\b/.test(t)) { handleBlockCard(); return }
+
+    // Everything else → AI analysis (financial questions, etc.)
+    setLiveTranscript('')
     setAnalyzing(true)
     try {
       const result = await aetherAI.analyzeScene({
@@ -123,8 +146,7 @@ export default function Dashboard() {
       type: cardBlocked ? 'UNBLOCK_CARD' : 'BLOCK_CARD',
       label: cardBlocked ? 'Unblock card' : 'Freeze card',
     })
-    if (res.success) toast.success(res.result.message)
-    else toast.error(res.error)
+    if (!res.success) toast.error(res.error)
   }
 
   const handleQuickAction = (key) => {
@@ -229,7 +251,7 @@ export default function Dashboard() {
 
             <div className="db-hero-head">
               <div>
-                <p className="db-hero-eyebrow">Total balance</p>
+                <p className="db-hero-eyebrow">Net Wealth</p>
                 <div className="db-hero-amount">
                   {sandboxLoaded
                     ? <>€<span className="db-hero-amount-num">{fmtEUR(total)}</span></>
@@ -313,7 +335,10 @@ export default function Dashboard() {
                     onClick={() => setActiveAcct(i)}
                     whileTap={{ scale: 0.97 }}
                   >
-                    <span className="db-acct-chip-dot" />
+                    <svg width="14" height="14" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0, fill: '#ff7819' }}>
+                      <rect x="0" fill="none" width="20" height="20"/>
+                      <path d="M10 2L3 6v1h14V6l-7-4zM5 8l-.2 7h2.5L7 8H5zm4 0l-.2 7h2.5L11 8H9zm4 0l-.2 7h2.5L15 8h-2zM3 18h14v-2H3v2z"/>
+                    </svg>
                     <span className="db-acct-chip-label">{a.label}</span>
                     <span className="db-acct-chip-bal">€{fmtEUR(a.balance, 0)}</span>
                   </motion.button>
@@ -347,13 +372,13 @@ export default function Dashboard() {
             whileTap={{ scale: 0.99 }}
             initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }}
           >
-            <span className="db-aether-orb">
-              <img src="/aether-icon.svg" alt="" width={18} height={18} />
+            <span className="logx-orb">
+              <img src="/aether-icon.svg" alt="" width={24} height={24} />
             </span>
             <span className="db-aether-text">
               <span className="db-aether-name">
-                Aether
-                <span className="db-live-dot" />
+                bunq Aether
+                {/* <span className="db-live-dot" /> */}
               </span>
               <span className="db-aether-status">{analyzing ? 'Thinking…' : 'Ask anything about your money'}</span>
             </span>

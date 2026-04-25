@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { Agent as UndiciAgent } from 'undici'
-import { dispatchAI, dispatchIdentify, getProviderStatus } from '../providers/index.js'
+import { dispatchAI, dispatchIdentify, dispatchReceipts, getProviderStatus } from '../providers/index.js'
 import {
   buildCacheKey, cacheLookup, cacheWrite, runWithDedup, shouldCacheResponse,
 } from '../services/cache.js'
@@ -50,7 +50,7 @@ aiRouter.post('/analyse', async (req, res, next) => {
       return res.status(400).json({ error: 'Either userMessage or imageBase64 is required' })
     }
 
-    const effectiveProvider = provider || process.env.DEFAULT_AI_PROVIDER || 'claude'
+    const effectiveProvider = provider || (imageBase64 ? 'claude' : 'gemini')
     const userId = DEFAULT_USER()
     const sid    = (typeof sessionId === 'string' && sessionId.trim()) ? sessionId.trim().slice(0, 64) : null
     const t0 = Date.now()
@@ -182,6 +182,29 @@ aiRouter.post('/identify', async (req, res, next) => {
 })
 
 /**
+ * POST /api/ai/receipts
+ * Multi-receipt analysis. ONE multimodal call.
+ * Body: { provider?, imageBase64, voiceText? }
+ * Returns: { receipts: [...], totalAcross, voiceResponse, insight }
+ */
+aiRouter.post('/receipts', async (req, res, next) => {
+  try {
+    const { provider, imageBase64, voiceText } = req.body || {}
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' })
+
+    const t0 = Date.now()
+    const result = await dispatchReceipts({
+      provider: provider || undefined,
+      imageBase64,
+      voiceText: voiceText || '',
+    })
+    res.json({ ok: true, latencyMs: Date.now() - t0, result })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/**
  * GET /api/ai/providers
  */
 aiRouter.get('/providers', async (req, res, next) => {
@@ -235,11 +258,11 @@ aiRouter.post('/speak', async (req, res, next) => {
           },
           body: JSON.stringify({
             text,
-            model_id: model,
+            model_id: 'eleven_multilingual_v2',
             voice_settings: {
-              stability:         0.35,
-              similarity_boost:  0.80,
-              style:             0.55,
+              stability:         0.50,
+              similarity_boost:  0.75,
+              style:             0.45,
               use_speaker_boost: true,
             },
             // 'off' skips the text-normalisation pass entirely — the single

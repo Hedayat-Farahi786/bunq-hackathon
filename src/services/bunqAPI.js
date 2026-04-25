@@ -29,13 +29,17 @@ export const bunqAPI = {
     apiClient.post(`/bunq/payments/${userId}/${accountId}/transfer`, { toIban, amount, description }),
 
   // ── Payment Requests (splits) ─────────────────────────────────
-  sendPaymentRequest: (userId = USER_ID, accountId = ACCOUNT_ID, contactAlias, amount, description) =>
-    apiClient.post(`/bunq/requests/${userId}/${accountId}/send`, { contactAlias, amount, description }),
+  sendPaymentRequest: (userId = USER_ID, accountId = ACCOUNT_ID, contactAlias, amount, description, attachmentId = null) =>
+    apiClient.post(`/bunq/requests/${userId}/${accountId}/send`, { contactAlias, amount, description, attachmentId }),
 
-  sendBulkPaymentRequest: (userId = USER_ID, accountId = ACCOUNT_ID, contacts, amounts, description) =>
+  sendBulkPaymentRequest: (userId = USER_ID, accountId = ACCOUNT_ID, contacts, amounts, description, attachmentId = null) =>
     Promise.all(contacts.map((c, i) =>
-      bunqAPI.sendPaymentRequest(userId, accountId, c.alias, amounts[i], description)
+      bunqAPI.sendPaymentRequest(userId, accountId, c.alias, amounts[i], description, attachmentId)
     )),
+
+  // ── Attachments (receipt images linked as note_attachment) ────
+  uploadAttachment: (userId = USER_ID, imageBase64, description = 'Aether receipt') =>
+    apiClient.post(`/bunq/attachment/${userId}`, { imageBase64, description }),
 
   // ── Transactions ─────────────────────────────────────────────
   getTransactions: (userId = USER_ID, accountId = ACCOUNT_ID, count = 50) =>

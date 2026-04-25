@@ -140,7 +140,7 @@ export default function VoiceInput({ onResult, onTranscript, compact = false }) 
     mode.current === 'speech' ? startSpeech() : startMedia()
   }
 
-  const Icon = display === 'transcribing' ? Loader2 : display === 'recording' || display === 'starting' ? Square : Mic
+  const Icon = display === 'transcribing' || display === 'starting' ? Loader2 : display === 'recording' ? Square : Mic
 
   return (
     <button

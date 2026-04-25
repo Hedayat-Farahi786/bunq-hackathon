@@ -11,6 +11,7 @@ import {
   Sparkles, Check, TriangleAlert, Mic, MoreVertical, Volume2, VolumeX,
   SwitchCamera, Keyboard, Send, Zap, Paperclip, ImagePlus, MessageSquarePlus,
   ArrowLeftRight, Target, Lock, Unlock, ChevronUp, ChevronDown,
+  Receipt as ReceiptIcon, Users, FileText, RotateCcw,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -102,6 +103,12 @@ function cleanForSpeech(text) {
     .replace(/\be\.g\./gi, 'for example')
     .replace(/\bi\.e\./gi, 'that is')
     .replace(/\betc\./gi, 'and so on')
+    // Numbers: "515.01" → "515 point zero one" for clearer reading
+    .replace(/(\d+)\.(\d+)(?!\s*(?:euros|dollars|pounds|percent))/g, '$1 point $2')
+    // Strip URLs and technical junk
+    .replace(/https?:\/\/\S+/g, '')
+    // Add slight pause before questions for natural intonation
+    .replace(/([^.!?])\s+(Can |Should |Want |Would |Do |Is |Are |How |What |Where )/g, '$1. $2')
     // Strip common filler openers that creep in despite the prompt.
     .replace(/^\s*(so|well|okay|ok|alright|let'?s see|let me see|hmm+|uh+|um+)[,\s]+/i, '')
     // Collapse multi-whitespace (preserve sentence boundaries).
@@ -169,12 +176,11 @@ function getAudioCtx() {
 
 function stopSpeaking() {
   try { _currentAudio?.pause() } catch {}
-  if (_currentAudio) { try { _currentAudio.removeAttribute('src'); _currentAudio.load() } catch {} }
   _currentAudio = null
   try { _currentAbort?.abort() } catch {}
   _currentAbort = null
   if (_currentObjectUrl) { try { URL.revokeObjectURL(_currentObjectUrl) } catch {}; _currentObjectUrl = null }
-  _currentMediaSource = null
+  if (_currentMediaSource) { try { _currentMediaSource.src.stop(); _currentMediaSource.ctx.close() } catch {}; _currentMediaSource = null }
   if (typeof window !== 'undefined') window.speechSynthesis?.cancel()
 }
 
@@ -182,6 +188,7 @@ async function speak(rawText, { onStart, onEnd } = {}) {
   const text = cleanForSpeech(rawText)
   if (!text) { onEnd?.(); return }
   stopSpeaking()
+  console.log('[SPEAK] called with', text?.length, 'chars')
 
   const hasElevenLabs = _ttsStatus?.elevenlabs === true
 
@@ -200,25 +207,24 @@ async function speak(rawText, { onStart, onEnd } = {}) {
         signal: ctrl.signal,
       })
       if (!res.ok) throw new Error(`TTS ${res.status}`)
-      const arrayBuf = await res.arrayBuffer()
-      const ctx = getAudioCtx()
-      if (ctx.state === 'suspended') await ctx.resume()
-      const audioBuf = await ctx.decodeAudioData(arrayBuf)
-      const source = ctx.createBufferSource()
-      source.buffer = audioBuf
-      source.connect(ctx.destination)
-      _currentMediaSource = source
-      onStart?.()
-      source.onended = () => { _currentMediaSource = null; onEnd?.() }
-      source.start(0)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const audio = new Audio(url)
+      _currentAudio = audio
+      _currentObjectUrl = url
+      audio.onplay = () => onStart?.()
+      audio.onended = () => { URL.revokeObjectURL(url); _currentAudio = null; _currentObjectUrl = null; onEnd?.() }
+      audio.onerror = () => { URL.revokeObjectURL(url); _currentAudio = null; _currentObjectUrl = null; onEnd?.() }
+      await audio.play()
       return
     } catch (err) {
       if (err?.name === 'AbortError') { onEnd?.(); return }
-      console.warn('[TTS] ElevenLabs failed, trying browser voice:', err.message)
+      console.warn('[TTS] ElevenLabs playback failed:', err.message, '— trying browser voice')
     }
   }
 
   // Fallback: browser speech synthesis
+  console.log('[TTS] using browser voice fallback')
   browserSpeak(text, { onStart, onEnd })
 }
 
@@ -346,9 +352,9 @@ export default function AetherMode() {
     accounts, goals, spendingPatterns, transactions, user, cardBlocked, getTotalBalance,
     currentAnalysis, setCurrentAnalysis,
     isAnalyzing, setIsAnalyzing,
-    dispatchAction, setAetherActive,
+    dispatchAction, undoActionById, setAetherActive,
     overlayHints, setOverlayHints, clearOverlayHints,
-    prefs, safeToSpend: sts,
+    prefs, safeToSpend: sts, contacts,
   } = useAetherStore()
 
   const [camReady, setCamReady]     = useState(false)
@@ -365,6 +371,10 @@ export default function AetherMode() {
   const [isSpeaking, setIsSpeaking] = useState(false)
   // What Aether is doing RIGHT NOW. Shown on the activity chip. Null when idle.
   const [activity, setActivity]     = useState(null)
+  const [capturedThumb, setCapturedThumb] = useState(null) // base64 thumbnail shown briefly after capture
+
+  // Clear thumbnail when analysis finishes
+  useEffect(() => { if (!isAnalyzing) { const t = setTimeout(() => setCapturedThumb(null), 600); return () => clearTimeout(t) } }, [isAnalyzing])
   // Options dropdown (voice / help / flip camera).
   const [optionsOpen, setOptionsOpen] = useState(false)
   // Reasoning trace collapse — default collapsed on mobile, expanded on
@@ -389,6 +399,15 @@ export default function AetherMode() {
   )
   const [textInput, setTextInput]   = useState('')
   const [lastQuestion, setLastQ]    = useState('')
+
+  // ── Receipts mode ──────────────────────────────────────────
+  // When the user invokes "Scan receipts" we capture one frame, send it to
+  // the multi-receipt endpoint, and surface the result as a sheet over the
+  // camera. No new pages — everything stays inside AetherMode.
+  const [receiptsResult, setReceiptsResult] = useState(null)
+  const [receiptsImage,  setReceiptsImage]  = useState(null)  // raw base64 for attachment uploads
+  const [receiptBusy,    setReceiptBusy]    = useState(null)  // id of the receipt currently dispatching
+  const [receiptActions, setReceiptActions] = useState({})    // { receiptId: actionLogEntryId } — last action per receipt
   const [liveTranscript, setLiveTranscript] = useState('')
   const [uploadedImage, setUploadedImage]   = useState(null)  // base64 string
   const [imagePreview, setImagePreview]     = useState(null)  // object URL
@@ -434,6 +453,7 @@ export default function AetherMode() {
 
   useEffect(() => {
     setAetherActive(true)
+    aetherAI.newSession() // fresh context each time user opens Aether
     startCamera()
     return () => {
       streamRef.current?.getTracks().forEach(t => t.stop())
@@ -533,6 +553,167 @@ export default function AetherMode() {
     return cv.toDataURL('image/jpeg', 0.65).split(',')[1]
   }, [camReady])
 
+  // ── Subtle UI sounds (Web Audio API — no files needed) ──
+  const playCapture = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      // Soft "shutter" — quick filtered noise burst
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.08, ctx.sampleRate)
+      const d = buf.getChannelData(0)
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3)
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      const filt = ctx.createBiquadFilter()
+      filt.type = 'bandpass'; filt.frequency.value = 3000; filt.Q.value = 1.5
+      const gain = ctx.createGain()
+      gain.gain.value = 0.12
+      src.connect(filt).connect(gain).connect(ctx.destination)
+      src.start()
+      src.onended = () => ctx.close()
+    } catch {}
+  }, [])
+
+  const playDone = useCallback(() => {}, [])
+
+  // Thinking sound — Web Audio API (completely separate from HTML Audio used by TTS)
+  const thinkCtxRef = useRef(null)
+
+  useEffect(() => {
+    if (!isAnalyzing) {
+      if (thinkCtxRef.current) {
+        try { thinkCtxRef.current.close() } catch {}
+        thinkCtxRef.current = null
+      }
+      return
+    }
+    const ac = new (window.AudioContext || window.webkitAudioContext)()
+    thinkCtxRef.current = ac
+    fetch('/thinking.ogg').then(r => r.arrayBuffer()).then(buf =>
+      ac.decodeAudioData(buf, decoded => {
+        if (ac !== thinkCtxRef.current) return
+        const s = ac.createBufferSource()
+        s.buffer = decoded; s.loop = true
+        const g = ac.createGain(); g.gain.value = 0.3
+        s.connect(g).connect(ac.destination); s.start()
+      })
+    ).catch(() => {})
+    return () => { try { ac.close() } catch {}; if (thinkCtxRef.current === ac) thinkCtxRef.current = null }
+  }, [isAnalyzing])
+
+  // Capture + show a brief visual confirmation
+  const captureWithFlash = useCallback(() => {
+    const frame = captureFrame()
+    if (frame) {
+      setCapturedThumb('data:image/jpeg;base64,' + frame)
+      playCapture()
+    }
+    return frame
+  }, [captureFrame, playCapture])
+
+  // Receipts capture — higher resolution so per-line items stay legible. Used
+  // by the Scan-receipts flow; the regular product/scene capture stays at
+  // 800px for speed.
+  const captureReceiptFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !camReady) return null
+    const v = videoRef.current
+    if (!v.videoWidth || v.readyState < 2) return null
+    const cv = canvasRef.current
+    const scale = Math.min(1, 1280 / v.videoWidth)
+    cv.width = Math.round(v.videoWidth * scale)
+    cv.height = Math.round(v.videoHeight * scale)
+    cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height)
+    return cv.toDataURL('image/jpeg', 0.78).split(',')[1]
+  }, [camReady])
+
+  // ── Scan-receipts pipeline ─────────────────────────────────
+  // One AI call. Image (camera frame OR upload) + optional voice context.
+  // Returns one row per visible receipt; we render them in the summary sheet.
+  const scanReceipts = useCallback(async ({ uploadImg = null, voiceText = '' } = {}) => {
+    const frame = uploadImg || (() => { const f = captureReceiptFrame(); if (f) { setCapturedThumb('data:image/jpeg;base64,' + f) } return f })()
+    if (!frame) {
+      toast('Camera not ready yet', { icon: '📸' })
+      return
+    }
+    setIsAnalyzing(true)
+    setActivity('Reading receipts')
+    setReceiptActions({})
+    try {
+      const res = await aetherAI.analyzeReceipts({ imageBase64: frame, voiceText })
+      setReceiptsResult(res)
+      setReceiptsImage(frame)
+      if (res?.voiceResponse) {
+        // Thinking sound stops automatically via isAnalyzing effect
+        speak(res.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
+      }
+      if (!res?.receipts?.length) {
+        toast('No receipts detected — try again with the bill in frame', { icon: '🧾' })
+      }
+    } catch (err) {
+      console.warn('[Receipts] scan failed:', err)
+      toast.error('Couldn\'t read the receipt — try again')
+    } finally {
+      setIsAnalyzing(false)
+      setActivity(null)
+    }
+  }, [captureReceiptFrame, speakOn])
+
+  // Per-receipt action: dispatchAction and remember the resulting log id so
+  // we can offer a per-row Undo button afterwards.
+  const handleReceiptAction = useCallback(async (receipt, kind) => {
+    if (!receipt) return
+    setReceiptBusy(receipt.id)
+    try {
+      const action = kind === 'split'
+        ? {
+            type:      'RECEIPT_SPLIT',
+            receipt,
+            amount:    receipt.total,
+            perPerson: receipt.splitSuggestion?.perPerson,
+            numPeople: receipt.splitSuggestion?.numPeople || 2,
+            label:     `Split €${receipt.total.toFixed(2)} (${receipt.merchant || 'Receipt'})`,
+            imageBase64: receiptsImage,
+          }
+        : {
+            type:      'RECEIPT_LOG',
+            receipt,
+            amount:    receipt.total,
+            label:     `File €${receipt.total.toFixed(2)} (${receipt.merchant || 'Receipt'})`,
+            imageBase64: receiptsImage,
+          }
+      const res = await dispatchAction(action)
+      if (res.success) {
+        toast.success(res.result.message)
+        // Read the freshest action-log entry id so per-row undo can find it.
+        const latest = useAetherStore.getState().actionLog[0]
+        if (latest) setReceiptActions(prev => ({ ...prev, [receipt.id]: latest.id }))
+      } else {
+        toast.error(res.error || 'Action failed')
+      }
+    } finally {
+      setReceiptBusy(null)
+    }
+  }, [dispatchAction, receiptsImage])
+
+  const handleReceiptUndo = useCallback(async (receipt) => {
+    const entryId = receiptActions[receipt.id]
+    if (!entryId) return
+    const ok = await undoActionById(entryId)
+    if (ok) {
+      toast('Undone', { icon: '↩' })
+      setReceiptActions(prev => {
+        const next = { ...prev }
+        delete next[receipt.id]
+        return next
+      })
+    }
+  }, [receiptActions, undoActionById])
+
+  const closeReceipts = useCallback(() => {
+    setReceiptsResult(null)
+    setReceiptsImage(null)
+    setReceiptActions({})
+  }, [])
+
   // Build a free online product image URL. source.unsplash.com was deprecated,
   // so we use DuckDuckGo's image redirect which resolves to a real product photo
   // without needing an API key. Falls back gracefully if it 404s.
@@ -625,7 +806,7 @@ export default function AetherMode() {
     stopSpeaking()
     setIsSpeaking(false)
     try {
-      const frame = uploadImg || (shouldCapture ? captureFrame() : null)
+      const frame = uploadImg || (shouldCapture ? captureWithFlash() : null)
       // Tailor the fallback message to the intent, so when there's no voice the
       // server still gets a clear directive.
       const defaultByIntent = {
@@ -651,18 +832,19 @@ export default function AetherMode() {
       // 🔊 Fire TTS FIRST — before React renders anything. This shaves 50-150ms
       // off perceived latency because the network request starts while React is
       // still scheduling the state updates below.
-      if (speakOn && result.voiceResponse) {
+      console.log('[DEBUG] speakOn:', speakOn, 'voiceResponse:', !!result.voiceResponse, result.voiceResponse?.slice(0, 30))
+      if (result.voiceResponse) {
+        // Stop thinking sound and wait a beat before TTS (mobile allows one audio at a time)
+        // Thinking sound stops automatically via isAnalyzing effect
         console.log('[TTS] speaking response:', result.voiceResponse.slice(0, 50))
-        speak(result.voiceResponse, {
-          onStart: () => setIsSpeaking(true),
-          onEnd:   () => setIsSpeaking(false),
-        })
+        speak(result.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
       }
 
       // In Aether Mode the user is actively asking, so always show all suggested actions.
       const allActions = Array.isArray(result.recommendedActions) ? result.recommendedActions : []
 
       setCurrentAnalysis(result)
+      playDone()
       setOverlayHints(Array.isArray(result.overlayHints) ? result.overlayHints : [])
 
       if (autoMode && allActions.length > 0) {
@@ -696,7 +878,7 @@ export default function AetherMode() {
     // Local one-liner only when there's NO follow-up question. With a question
     // we're about to speak Claude's real answer — the canned line would just
     // step on it.
-    if (!userQuestion && speakOn && price > 0) {
+    if (!userQuestion && price > 0) {
       const line = aff?.level === 'affordable' ? `That's a ${name}… about €${price}. You've got plenty of room for that.`
                  : aff?.level === 'tight'       ? `${name}, around €${price}. You can swing it — just a bit tight this month.`
                  : aff?.level === 'stretch'     ? `Hmm, ${name} at €${price}. That'd be a stretch. Want me to check your savings?`
@@ -735,11 +917,10 @@ Answer their actual question with specific numbers from their profile. If the pr
           setActivity(null)
           return
         }
-        if (speakOn && result.voiceResponse) {
-          speak(result.voiceResponse, {
-            onStart: () => setIsSpeaking(true),
-            onEnd:   () => setIsSpeaking(false),
-          })
+        if (result.voiceResponse) {
+          const a = thinkingAudioRef.current
+          thinkingAudioRef.current = null
+          speak(result.voiceResponse, { onStart: () => setIsSpeaking(true), onEnd: () => setIsSpeaking(false) })
         }
         setCurrentAnalysis(result)
         const allActions = Array.isArray(result.recommendedActions) ? result.recommendedActions : []
@@ -918,7 +1099,7 @@ Answer their actual question with specific numbers from their profile. If the pr
     unlockSpeech()
     const img = uploadedImage
     if (img) clearUploadedImage()
-    ask(text, { withFrame: !img && camReady, uploadedImage: img })
+    ask(text, { uploadedImage: img })
   }
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0]
@@ -949,7 +1130,7 @@ Answer their actual question with specific numbers from their profile. If the pr
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     const img = uploadedImage
     clearUploadedImage()
-    ask(text, { withFrame: !img && camReady, uploadedImage: img })
+    ask(text, { uploadedImage: img })
   }
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -963,7 +1144,7 @@ Answer their actual question with specific numbers from their profile. If the pr
     const res = await dispatchAction(action)
     if (res.success) {
       toast.success(res.result.message)
-      if (speakOn) speak(res.result.message, {
+      speak(res.result.message, {
         onStart: () => setIsSpeaking(true),
         onEnd:   () => setIsSpeaking(false),
       })
@@ -993,7 +1174,22 @@ Answer their actual question with specific numbers from their profile. If the pr
   // Status mapping — supports both new "status" and legacy "risk"
   const rawStatus = currentAnalysis?.status?.level
     ?? currentAnalysis?.risk?.level?.toLowerCase()
-  const statusInfo = STATUS_COLORS[rawStatus] || null
+  const statusInfo = (() => {
+    if (!currentAnalysis) return null
+    const scene = currentAnalysis.scene?.type?.toLowerCase() || ''
+    const risk = currentAnalysis.risk?.level?.toLowerCase() || ''
+    const hasActions = currentAnalysis.recommendedActions?.length > 0
+    const voice = currentAnalysis.voiceResponse || ''
+    if (scene === 'receipt') return { bg: '#ff7819', label: 'Receipt scanned' }
+    if (scene === 'shopping') return { bg: '#8b5cf6', label: 'Shopping detected' }
+    if (risk === 'high' || risk === 'critical') return { bg: '#f04438', label: 'Needs attention' }
+    if (risk === 'medium') return { bg: '#f59e0b', label: 'Worth checking' }
+    if (hasActions) return { bg: '#0080ff', label: 'I can help' }
+    // Only show badge for substantial responses, not short chat replies
+    if (voice.length < 80) return null
+    if (scene === 'financial') return { bg: '#34d399', label: 'Finances checked' }
+    return null
+  })()
   const statusMessage = currentAnalysis?.status?.message || currentAnalysis?.risk?.reason
   // Monochrome Lucide icons inherit `currentColor` from the chip's text colour,
   // so they always read as buttons rather than colourful stickers.
@@ -1022,6 +1218,20 @@ Answer their actual question with specific numbers from their profile. If the pr
       <div className="aether-camera-bg">
         <video ref={videoRef} className="camera-feed" playsInline muted autoPlay />
         <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+        {/* Capture flash */}
+        <AnimatePresence>
+          {capturedThumb && (
+            <motion.div
+              key="flash"
+              className="capture-flash"
+              initial={{ opacity: 0.6 }}
+              animate={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+            />
+          )}
+        </AnimatePresence>
+
         {!camReady && (
           <div className="camera-fallback">
             <div className="camera-grid" />
@@ -1040,22 +1250,34 @@ Answer their actual question with specific numbers from their profile. If the pr
                 </div>
                 <button
                   onClick={() => window.location.reload()}
-                  style={{ background: '#0080ff', border: 'none', borderRadius: 12, padding: '10px 24px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                  style={{ background: '#ff7819', border: 'none', borderRadius: 12, padding: '10px 24px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', boxShadow: '0 8px 20px rgba(255,120,25,0.28)' }}
                 >
                   Reload page
                 </button>
               </motion.div>
             ) : (
-              <>
+              <motion.div
+                style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.3 }}
+              >
                 <motion.div
-                  className="camera-loader-orb"
-                  animate={{ scale: [1, 1.08, 1], opacity: [0.6, 0.9, 0.6] }}
-                  transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+                  style={{ width: 56, height: 56, borderRadius: 16, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  animate={{ scale: [1, 1.06, 1] }}
+                  transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
                 >
-                  <img src="/aether-icon.svg" alt="" />
+                  <img src="/aether-icon.svg" alt="" width={28} height={28} />
                 </motion.div>
-                <div className="camera-loader-text">Warming up the camera…</div>
-              </>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.4)', letterSpacing: '-0.01em' }}>Starting camera</div>
+                <div style={{ width: 40, height: 3, borderRadius: 999, overflow: 'hidden', background: 'rgba(255,255,255,0.06)' }}>
+                  <motion.div
+                    style={{ height: '100%', borderRadius: 999, background: '#0080ff' }}
+                    animate={{ width: ['0%', '100%'] }}
+                    transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                  />
+                </div>
+              </motion.div>
             )}
           </div>
         )}
@@ -1215,7 +1437,6 @@ Answer their actual question with specific numbers from their profile. If the pr
                     const next = !autoMode
                     setAutoMode(next)
                     localStorage.setItem('aether_auto', next ? '1' : '0')
-                    setOptionsOpen(false)
                   }}
                   initial={{ opacity: 0, x: 6 }}
                   animate={{ opacity: 1, x: 0 }}
@@ -1229,7 +1450,7 @@ Answer their actual question with specific numbers from their profile. If the pr
 
                 <motion.button
                   className={`option-item ${speakOn ? 'on' : ''}`}
-                  onClick={() => { toggleSpeak(); setOptionsOpen(false) }}
+                  onClick={() => toggleSpeak()}
                   initial={{ opacity: 0, x: 6 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.06 }}
@@ -1244,29 +1465,7 @@ Answer their actual question with specific numbers from their profile. If the pr
 
                 <motion.button
                   className="option-item"
-                  onClick={() => {
-                    aetherAI.newSession()
-                    setCurrentAnalysis(null)
-                    setActions([])
-                    setLastQ('')
-                    clearOverlayHints()
-                    stopSpeaking()
-                    setIsSpeaking(false)
-                    setOptionsOpen(false)
-                    toast('Fresh conversation', { icon: '✦' })
-                  }}
-                  initial={{ opacity: 0, x: 6 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.08 }}
-                  data-tooltip="Start a fresh conversation"
-                >
-                  <span className="option-icon"><MessageSquarePlus size={16} /></span>
-                  <span className="option-label">New chat</span>
-                </motion.button>
-
-                <motion.button
-                  className="option-item"
-                  onClick={() => { stopCamera(); setCamReady(false); setFacing(f => f === 'environment' ? 'user' : 'environment'); setOptionsOpen(false) }}
+                  onClick={() => { stopCamera(); setCamReady(false); setFacing(f => f === 'environment' ? 'user' : 'environment') }}
                   initial={{ opacity: 0, x: 6 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.10 }}
@@ -1384,6 +1583,152 @@ Answer their actual question with specific numbers from their profile. If the pr
         )}
       </AnimatePresence>
 
+      {/* ── Receipts summary sheet ───────────────────────────────
+          Slides up over the camera once a multi-receipt scan resolves.
+          One row per receipt, with per-row Split / File + Undo. Tap
+          backdrop or × to dismiss. Lives inside AetherMode — no new page. */}
+      <AnimatePresence>
+        {receiptsResult && (
+          <>
+            <motion.div
+              key="rc-backdrop"
+              className="receipts-backdrop"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              onClick={closeReceipts}
+            />
+            <motion.div
+              key="rc-sheet"
+              className="receipts-sheet"
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 320 }}
+              role="dialog"
+              aria-label="Receipts summary"
+            >
+              <div className="receipts-grabber" />
+              <header className="receipts-head">
+                <div className="receipts-head-text">
+                  <h3 className="receipts-title">
+                    {receiptsResult.receipts.length === 0
+                      ? 'No receipts found'
+                      : receiptsResult.receipts.length === 1
+                        ? '1 receipt'
+                        : `${receiptsResult.receipts.length} receipts`}
+                  </h3>
+                  {receiptsResult.receipts.length > 0 && (
+                    <p className="receipts-sub">
+                      Total €{Number(receiptsResult.totalAcross || 0).toFixed(2)}
+                      {Object.keys(receiptActions).length > 0 && (
+                        <> · {Object.keys(receiptActions).length} filed</>
+                      )}
+                    </p>
+                  )}
+                </div>
+                <button className="receipts-close" onClick={closeReceipts} aria-label="Close">
+                  <X size={16} />
+                </button>
+              </header>
+
+              {receiptsResult.receipts.length === 0 ? (
+                <div className="receipts-empty">
+                  <ReceiptIcon size={28} strokeWidth={1.4} />
+                  <p>{receiptsResult.voiceResponse || 'No receipts visible. Try filling the frame with the bill.'}</p>
+                  <button className="receipts-retry" onClick={() => { closeReceipts(); scanReceipts() }}>
+                    <RefreshCcw size={14} /> Try again
+                  </button>
+                </div>
+              ) : (
+                <ul className="receipts-list">
+                  {receiptsResult.receipts.map((r) => {
+                    const actionedId = receiptActions[r.id]
+                    const split = r.splitSuggestion
+                    return (
+                      <li key={r.id} className={`receipt-row ${actionedId ? 'is-done' : ''}`}>
+                        <div className="receipt-row-head">
+                          <div className="receipt-row-name">
+                            <h4>{r.merchant}</h4>
+                            <div className="receipt-row-meta">
+                              <span className="receipt-chip">{r.category}</span>
+                              {r.items.length > 0 && (
+                                <span className="receipt-chip muted">{r.items.length} item{r.items.length === 1 ? '' : 's'}</span>
+                              )}
+                              {r.date && <span className="receipt-chip muted">{r.date}</span>}
+                            </div>
+                          </div>
+                          <div className="receipt-row-total">
+                            <span className="receipt-total-num">€{r.total.toFixed(2)}</span>
+                            {split && (
+                              <span className="receipt-total-split">€{split.perPerson.toFixed(2)} × {split.numPeople}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {r.items.length > 0 && (
+                          <ul className="receipt-items">
+                            {r.items.slice(0, 3).map((it, i) => (
+                              <li key={i}>
+                                <span className="receipt-item-name">{it.qty > 1 ? `${it.qty}× ` : ''}{it.name}</span>
+                                {it.price > 0 && <span className="receipt-item-price">€{it.price.toFixed(2)}</span>}
+                              </li>
+                            ))}
+                            {r.items.length > 3 && (
+                              <li className="receipt-items-more">+{r.items.length - 3} more</li>
+                            )}
+                          </ul>
+                        )}
+
+                        <div className="receipt-actions">
+                          {actionedId ? (
+                            <>
+                              <span className="receipt-done-label">
+                                <Check size={12} /> Filed
+                              </span>
+                              <button
+                                className="receipt-undo"
+                                onClick={() => handleReceiptUndo(r)}
+                              >
+                                <RotateCcw size={12} /> Undo
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {split && (
+                                <button
+                                  className="receipt-action receipt-action--split"
+                                  disabled={receiptBusy === r.id}
+                                  onClick={() => handleReceiptAction(r, 'split')}
+                                >
+                                  {receiptBusy === r.id
+                                    ? <Loader size={13} className="spin" />
+                                    : <Users size={13} />}
+                                  Split €{split.perPerson.toFixed(2)} × {split.numPeople}
+                                </button>
+                              )}
+                              <button
+                                className="receipt-action receipt-action--log"
+                                disabled={receiptBusy === r.id}
+                                onClick={() => handleReceiptAction(r, 'log')}
+                              >
+                                {receiptBusy === r.id && !split
+                                  ? <Loader size={13} className="spin" />
+                                  : <FileText size={13} />}
+                                File as {r.category}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
       {/* Bottom panel */}
       <div className="aether-bottom">
 
@@ -1409,8 +1754,20 @@ Answer their actual question with specific numbers from their profile. If the pr
               exit={{ opacity: 0, scale: 0.97 }}
               transition={{ duration: 0.2 }}
             >
-              <span className="reply-orb reply-orb-spin"><img src="/aether-icon.svg" alt="" className="reply-orb-img" /></span>
-              <ThinkingText activity={activity} />
+              {capturedThumb && (
+                <motion.img
+                  src={capturedThumb}
+                  alt=""
+                  className="thinking-thumb"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.2 }}
+                />
+              )}
+              <div className="thinking-row">
+                <span className="reply-orb reply-orb-spin"><img src="/aether-icon.svg" alt="" className="reply-orb-img" /></span>
+                <ThinkingText activity={activity} />
+              </div>
             </motion.div>
           ) : currentAnalysis?.voiceResponse ? (
             <motion.div key={currentAnalysis.voiceResponse} className="aether-reply"
@@ -1446,66 +1803,11 @@ Answer their actual question with specific numbers from their profile. If the pr
                     <span className="reply-status-label">{statusInfo.label}</span>
                   </div>
                 )}
-                {currentAnalysis.judgment?.reasoning?.length > 0 && (
-                  <button
-                    className={`reply-reasoning-toggle ${reasoningOpen ? 'open' : ''}`}
-                    onClick={toggleReasoning}
-                    aria-expanded={reasoningOpen}
-                    aria-label={reasoningOpen ? 'Hide reasoning' : 'Show reasoning'}
-                  >
-                    {reasoningOpen ? <ChevronUp size={11} strokeWidth={2.2} /> : <ChevronDown size={11} strokeWidth={2.2} />}
-                    <span>Why</span>
-                  </button>
-                )}
               </div>
               <p className="reply-text">
                 {currentAnalysis.voiceResponse}
               </p>
-              <AnimatePresence initial={false}>
-                {currentAnalysis.judgment?.reasoning?.length > 0 && reasoningOpen && (
-                  <motion.div
-                    key="judgment"
-                    className={`reply-judgment reply-judgment--${currentAnalysis.judgment.verdict || 'general-good'}`}
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: 'auto', marginTop: 4 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    transition={{ duration: 0.22 }}
-                  >
-                    <header className="reply-judgment-header">
-                      <span className="reply-judgment-label">The math</span>
-                      <span className="reply-judgment-verdict">
-                        {(() => {
-                          const v = currentAnalysis.judgment.verdict
-                          if (v === 'easy')           return 'Easy'
-                          if (v === 'tight')          return 'Tight'
-                          if (v === 'over')           return 'Over'
-                          if (v === 'general-tight')  return 'Tight'
-                          if (v === 'general-spike')  return 'Spend up'
-                          return 'On track'
-                        })()}
-                      </span>
-                    </header>
-                    <dl className="reply-judgment-rows">
-                      {currentAnalysis.judgment.reasoning.map((row, i) => (
-                        <div
-                          key={`${row.label}-${i}`}
-                          className={[
-                            'reply-judgment-row',
-                            row.emphasise ? 'is-emphasised' : '',
-                            row.tone ? `tone-${row.tone}` : '',
-                          ].filter(Boolean).join(' ')}
-                        >
-                          <dt className="reply-judgment-row-label">{row.label}</dt>
-                          <dd className="reply-judgment-row-value">{row.value}</dd>
-                          {row.detail && (
-                            <span className="reply-judgment-row-detail">{row.detail}</span>
-                          )}
-                        </div>
-                      ))}
-                    </dl>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              
               {currentAnalysis.insight && (
                 <p className="reply-insight">{currentAnalysis.insight}</p>
               )}
@@ -1624,7 +1926,17 @@ Answer their actual question with specific numbers from their profile. If the pr
                 )}
               </AnimatePresence>
               <div className="aether-pill-mic" onTouchStart={unlockSpeech} onMouseDown={unlockSpeech}>
-                <VoiceInput onResult={handleVoice} onTranscript={setLiveTranscript} compact />
+                {isAnalyzing ? (
+                  <button
+                    type="button"
+                    className="aether-stop-btn"
+                    onClick={() => { setIsAnalyzing(false); setActivity(null); stopSpeaking() }}
+                  >
+                    <span style={{width:14,height:14,borderRadius:3,background:"currentColor",display:"block"}} />
+                  </button>
+                ) : (
+                  <VoiceInput onResult={handleVoice} onTranscript={setLiveTranscript} compact />
+                )}
               </div>
             </div>
           </form>
@@ -1648,35 +1960,46 @@ Answer their actual question with specific numbers from their profile. If the pr
                 <X size={16} />
               </button>
               <div className="help-orb"><img src="/aether-icon.svg" alt="" /></div>
-              <h2 className="help-title">Hey, I'm Aether</h2>
-              <p className="help-sub">Your money co-pilot. Here's what I'm great at:</p>
+              <h2 className="help-title">Meet Aether</h2>
+              <p className="help-sub">The smartest way to manage your money with bunq.</p>
               <ul className="help-list">
                 <li>
                   <span className="help-step">1</span>
                   <div>
-                    <strong>Ask me anything</strong>
-                    <p>"Can I afford this?" · "Split this bill" · "How'd I do this week?"</p>
+                    <strong>Talk or type</strong>
+                    <p>Ask anything about your money — "How am I doing?", "Can I afford this?", "What did I spend this week?"</p>
                   </div>
                 </li>
                 <li>
                   <span className="help-step">2</span>
                   <div>
-                    <strong>Or just show me</strong>
-                    <p>Point the camera at a receipt, price tag, or product — I'll read it.</p>
+                    <strong>Point your camera</strong>
+                    <p>Show a product to get instant price + affordability check. Show a receipt to read totals and split bills.</p>
                   </div>
                 </li>
                 <li>
                   <span className="help-step">3</span>
                   <div>
-                    <strong>You're always in charge</strong>
-                    <p>I suggest — you tap to confirm. Nothing moves without you.</p>
+                    <strong>Aether speaks back</strong>
+                    <p>Natural voice responses powered by ElevenLabs. Toggle voice on/off in the options menu.</p>
+                  </div>
+                </li>
+                <li>
+                  <span className="help-step">4</span>
+                  <div>
+                    <strong>Real actions</strong>
+                    <p>Freeze your card, split bills, send payment requests — all connected to your real bunq account.</p>
+                  </div>
+                </li>
+                <li>
+                  <span className="help-step">5</span>
+                  <div>
+                    <strong>You're always in control</strong>
+                    <p>Every action needs your tap. 10-second undo on everything. Full activity log.</p>
                   </div>
                 </li>
               </ul>
-              <div className="help-tip">
-                <strong>Tip:</strong> <em>Ask</em> mode confirms first. <em>Auto</em> acts instantly for the brave.
-              </div>
-              <button className="help-got-it" onClick={dismissHelp}>Let's go</button>
+              <button className="help-got-it" onClick={dismissHelp}>Got it</button>
             </motion.div>
           </motion.div>
         )}

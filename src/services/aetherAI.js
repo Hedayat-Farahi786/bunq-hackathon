@@ -89,6 +89,34 @@ export const aetherAI = {
   },
 
   /**
+   * Analyse an image that may contain ONE OR MORE receipts. Single multimodal
+   * call. Returns { receipts: [...], totalAcross, voiceResponse, insight }.
+   *
+   * Each receipt entry has: { id, merchant, total, currency, date, items[],
+   * category, splitSuggestion?, confidence, bbox } — the bbox lets us crop
+   * the right image slice when uploading the per-receipt attachment.
+   */
+  analyzeReceipts: async ({ imageBase64, voiceText }) => {
+    if (!imageBase64) throw new Error('imageBase64 required')
+    try {
+      const { result } = await apiClient.post('/ai/receipts', {
+        provider:    selectedProvider === 'auto' ? undefined : selectedProvider,
+        imageBase64,
+        voiceText:   voiceText || '',
+      })
+      return result
+    } catch (err) {
+      console.warn('[Aether AI] receipts failed:', err.message)
+      return {
+        receipts:      [],
+        totalAcross:   0,
+        voiceResponse: err.message || 'Could not reach receipts service.',
+        insight:       '',
+      }
+    }
+  },
+
+  /**
    * Identify up to 3 products in the frame + estimate prices.
    * Returns { products: [ { name, brand, category, priceEstimate, priceLow, priceHigh, bbox, details, confidence } ], sceneNote }.
    */

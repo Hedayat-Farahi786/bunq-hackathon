@@ -11,6 +11,7 @@ import { callGemini,  isGeminiAvailable  } from './gemini.js'
 import { callOllama,  isOllamaAvailable, getOllamaModels } from './ollama.js'
 import { SYSTEM_PROMPT } from '../prompts/financial.js'
 import { IDENTIFY_SYSTEM_PROMPT } from '../prompts/identify.js'
+import { RECEIPTS_SYSTEM_PROMPT } from '../prompts/receipts.js'
 
 export const PROVIDERS = {
   claude: { call: callClaude, check: isClaudeAvailable, label: 'Claude (Anthropic)' },
@@ -213,6 +214,145 @@ function normaliseIdentify(raw) {
   return {
     products,
     sceneNote: raw.sceneNote || raw.reasoning || (products.length ? '' : 'No products detected.'),
+  }
+}
+
+/**
+ * Receipts dispatch — multimodal call that returns a structured array of
+ * receipts in the frame. One AI call total, regardless of how many receipts
+ * are in the picture. Falls back across providers, then to a local mock.
+ */
+export async function dispatchReceipts({ provider, imageBase64, voiceText }) {
+  if (!imageBase64) {
+    throw Object.assign(new Error('imageBase64 is required for receipts'), { status: 400 })
+  }
+
+  const userMessage = voiceText && voiceText.trim()
+    ? `Voice context: "${voiceText.trim()}". Read every visible receipt in this image and return the JSON schema from the system prompt.`
+    : 'Read every visible receipt in this image and return the JSON schema from the system prompt.'
+
+  const order = provider && provider !== 'auto'
+    ? [provider, ...['claude', 'gemini'].filter(p => p !== provider)]
+    : ['claude', 'gemini']
+
+  for (const name of order) {
+    const p = PROVIDERS[name]
+    if (!p) continue
+    const available = await p.check()
+    if (!available) continue
+    try {
+      const callArgs = { systemPrompt: RECEIPTS_SYSTEM_PROMPT, userMessage, imageBase64 }
+      if (name === 'claude') callArgs.model = CLAUDE_VISION_MODEL
+      const raw = await p.call(callArgs)
+      return normaliseReceipts(raw)
+    } catch (err) {
+      const isAuth = err.status === 401 || err.status === 403
+      const isOverload = err.retryable || err.status === 503 || err.status === 429
+      if (isAuth || isOverload) {
+        console.warn(`[Receipts] ${name} failed (${err.status}) — trying next`)
+        continue
+      }
+      throw err
+    }
+  }
+
+  return getMockReceiptsResponse()
+}
+
+function normaliseReceipts(raw) {
+  const empty = { receipts: [], totalAcross: 0, voiceResponse: 'No receipts detected.', insight: '' }
+  if (!raw || typeof raw !== 'object') return empty
+
+  const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, Number(n) || 0))
+  const toNum = (n) => {
+    const v = Number(n)
+    return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0
+  }
+
+  const list = Array.isArray(raw.receipts) ? raw.receipts : []
+  const receipts = list
+    .map((r, i) => {
+      if (!r || typeof r !== 'object') return null
+      const total = toNum(r.total)
+      if (!total || total <= 0) return null
+      const b = r.bbox || {}
+      const items = Array.isArray(r.items)
+        ? r.items
+            .map(it => ({
+              name:  String(it?.name || '').slice(0, 60),
+              price: toNum(it?.price),
+              qty:   Math.max(1, Number(it?.qty) || 1),
+            }))
+            .filter(it => it.name)
+            .slice(0, 25)
+        : []
+      const splitRaw = r.splitSuggestion
+      const splitSuggestion = (splitRaw && Number(splitRaw.numPeople) >= 2)
+        ? {
+            numPeople: Math.min(20, Math.max(2, Math.round(Number(splitRaw.numPeople)))),
+            perPerson: toNum(splitRaw.perPerson) || toNum(total / Math.round(Number(splitRaw.numPeople))),
+          }
+        : null
+      return {
+        id:       `rcpt_${Date.now().toString(36)}_${i}`,
+        merchant: String(r.merchant || 'Receipt').slice(0, 80),
+        total,
+        currency: (r.currency || 'EUR').toUpperCase().slice(0, 3),
+        date:     r.date || null,
+        items,
+        category: ['Dining','Groceries','Transport','Shopping','Entertainment','Health','Travel','Bills','Other'].includes(r.category) ? r.category : 'Other',
+        splitSuggestion,
+        confidence: Math.max(0, Math.min(1, Number(r.confidence) || 0.7)),
+        bbox: {
+          x: clamp(b.x),
+          y: clamp(b.y),
+          w: clamp(b.w, 1, 100),
+          h: clamp(b.h, 1, 100),
+        },
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 8)
+
+  const totalAcross = receipts.reduce((s, r) => s + r.total, 0)
+  const voiceResponse = String(raw.voiceResponse || '').slice(0, 240) ||
+    (receipts.length === 0
+      ? "I'm not seeing a receipt — try filling the frame with it."
+      : receipts.length === 1
+        ? `€${receipts[0].total.toFixed(2)} from ${receipts[0].merchant}.`
+        : `${receipts.length} receipts — €${totalAcross.toFixed(2)} total.`)
+
+  return {
+    receipts,
+    totalAcross: Math.round(totalAcross * 100) / 100,
+    voiceResponse,
+    insight: String(raw.insight || '').slice(0, 240),
+  }
+}
+
+function getMockReceiptsResponse() {
+  return {
+    receipts: [
+      {
+        id:       'rcpt_mock_0',
+        merchant: 'Loetje',
+        total:    47.80,
+        currency: 'EUR',
+        date:     null,
+        items:    [
+          { name: 'Bitterballen', price: 7.50, qty: 1 },
+          { name: 'Steak',        price: 24.00, qty: 1 },
+          { name: 'Drinks',       price: 16.30, qty: 1 },
+        ],
+        category: 'Dining',
+        splitSuggestion: { numPeople: 3, perPerson: 15.93 },
+        confidence: 0.85,
+        bbox:     { x: 10, y: 5, w: 80, h: 88 },
+      },
+    ],
+    totalAcross: 47.80,
+    voiceResponse: 'Demo mode: €47.80 from Loetje. Want to split — about €16 each?',
+    insight: 'Add an Anthropic key to enable real receipt analysis.',
   }
 }
 

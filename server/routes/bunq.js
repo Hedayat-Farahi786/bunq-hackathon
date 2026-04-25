@@ -200,16 +200,82 @@ bunqRouter.post('/payments/:userId/:accountId/transfer', async (req, res, next) 
 // ── Payment requests (split) ───────────────────────────────────
 bunqRouter.post('/requests/:userId/:accountId/send', async (req, res, next) => {
   try {
-    const { contactAlias, amount, description } = req.body
+    const { contactAlias, amount, description, attachmentId } = req.body
+    const body = {
+      amount_inquired:    { value: Number(amount).toFixed(2), currency: 'EUR' },
+      counterparty_alias: { type: 'EMAIL', value: contactAlias },
+      description:        description || 'Aether Split',
+      allow_bunqme:       true,
+    }
+    // Link the receipt image as a NoteAttachment so the recipient sees the
+    // bill alongside the request. bunq expects an array of { id } refs.
+    if (attachmentId) body.attachment = [{ id: Number(attachmentId) }]
+
     const data = await bunqProxy(
       'POST',
       `/user/${req.params.userId}/monetary-account/${req.params.accountId}/request-inquiry`,
-      {
-        amount_inquired:    { value: Number(amount).toFixed(2), currency: 'EUR' },
-        counterparty_alias: { type: 'EMAIL', value: contactAlias },
-        description:        description || 'Aether Split',
-        allow_bunqme:       true,
-      },
+      body,
+      resolveToken(req)
+    )
+    res.json(data)
+  } catch (err) { next(err) }
+})
+
+// ── Attachments — upload a receipt image to attach to a payment/request ───
+//
+// bunq's real flow expects a binary POST with X-Bunq-Attachment-Description
+// header to /user/{user_id}/attachment-public, which returns a uuid we use as
+// `attachment_public_uuid` on the resource. In the sandbox / mocked flow we
+// return a synthetic id and let the demo proceed.
+bunqRouter.post('/attachment/:userId', async (req, res, next) => {
+  try {
+    const { imageBase64, description } = req.body || {}
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' })
+
+    if (isMocked()) {
+      const id = `att_mock_${Date.now().toString(36)}`
+      return res.json({ ok: true, mock: true, id, uuid: id, description: description || null })
+    }
+
+    // Strip the data:URL prefix if present, decode to a binary buffer
+    const b64 = String(imageBase64).replace(/^data:[^;]+;base64,/, '')
+    const buf = Buffer.from(b64, 'base64')
+    const url = `${BASE}/user/${req.params.userId}/attachment-public`
+    const headers = bunqHeaders(resolveToken(req))
+    headers['Content-Type'] = 'image/jpeg'
+    if (description) headers['X-Bunq-Attachment-Description'] = String(description).slice(0, 100)
+    // bunq expects a signature over the binary body for mutating calls
+    if (PRIVATE_KEY) {
+      const sign = createSign('SHA256')
+      sign.update(buf)
+      headers['X-Bunq-Client-Signature'] = sign.sign(PRIVATE_KEY, 'base64')
+    }
+
+    const r = await fetch(url, {
+      method:  'POST',
+      headers,
+      body:    buf,
+      signal:  AbortSignal.timeout(20_000),
+    })
+    if (!r.ok) {
+      const text = await r.text().catch(() => '')
+      return res.status(502).json({ error: 'bunq attachment upload failed', detail: text.slice(0, 200) })
+    }
+    const data = await r.json()
+    const uuid = data.Response?.find(x => x.Uuid)?.Uuid?.uuid
+    const id   = data.Response?.find(x => x.Id)?.Id?.id
+    res.json({ ok: true, id: id || uuid, uuid, raw: data })
+  } catch (err) { next(err) }
+})
+
+// ── Update account ──────────────────────────────────────────
+bunqRouter.put('/accounts/:userId/:accountId', async (req, res, next) => {
+  try {
+    const { description } = req.body
+    const data = await bunqProxy(
+      'PUT',
+      `/user/${req.params.userId}/monetary-account-bank/${req.params.accountId}`,
+      { description },
       resolveToken(req)
     )
     res.json(data)

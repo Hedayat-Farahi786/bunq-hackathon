@@ -135,7 +135,7 @@ export const useAetherStore = create((set, get) => ({
               balance:  parseFloat(a.balance?.value || 0),
               currency: a.balance?.currency || 'EUR',
               iban:     a.alias?.find(al => al.type === 'IBAN')?.value || '',
-              color:    '#1a56db',
+              color:    '#ff7819',
               status:   a.status,
             }))
           if (loadedAccounts.length > 0) {
@@ -480,7 +480,7 @@ export const useAetherStore = create((set, get) => ({
 
         case 'PAYMENT_REQUEST': {
           const contacts = action.contacts?.length ? action.contacts : (action.toContact ? [{ alias: action.toContact }] : [])
-          const perPerson = action.amount || action.perPerson || 0
+          const perPerson = action.perPerson || action.amount || 0
           if (contacts.length > 0) {
             await Promise.all(contacts.map(c =>
               bunqAPI.sendPaymentRequest(undefined, undefined, c.alias, perPerson, action.description || 'Split request')
@@ -555,6 +555,78 @@ export const useAetherStore = create((set, get) => ({
           result = { message: `Spending limit set: €${action.limitAmount}/${action.period}` }
           break
 
+        case 'RECEIPT_SPLIT': {
+          const receipt   = action.receipt || {}
+          const total     = Number(action.amount ?? receipt.total ?? 0)
+          const numPeople = Math.max(2, Math.round(Number(action.numPeople ?? receipt.splitSuggestion?.numPeople ?? 2)))
+          const perPerson = Number(action.perPerson ?? receipt.splitSuggestion?.perPerson ?? (total / numPeople))
+          if (!total || !perPerson) throw new Error('Receipt split missing total or per-person amount')
+
+          // Upload the receipt image as an attachment so the request carries
+          // the bill alongside it. Sandbox returns a synthetic id; production
+          // returns a real bunq attachment uuid.
+          let attachmentId = null
+          if (action.imageBase64) {
+            try {
+              const att = await bunqAPI.uploadAttachment(undefined, action.imageBase64, `${receipt.merchant || 'Receipt'} · €${total.toFixed(2)}`)
+              attachmentId = att?.id || att?.uuid || null
+            } catch (e) {
+              console.warn('[receipt] attachment upload failed, continuing without:', e.message)
+            }
+          }
+
+          const description = `${receipt.merchant || 'Receipt'} · €${total.toFixed(2)} · ${numPeople}-way split`
+          const contacts = action.contacts?.length
+            ? action.contacts
+            : (get().contacts || []).slice(0, Math.max(0, numPeople - 1)).map(c => ({ alias: c.email || c.alias || c.iban }))
+
+          if (contacts.length > 0) {
+            await Promise.all(contacts.map(c =>
+              bunqAPI.sendPaymentRequest(undefined, undefined, c.alias, perPerson, description, attachmentId)
+            ))
+          } else {
+            // No contacts — simulate so the demo still flows (and the action
+            // is logged for the activity feed).
+            await new Promise(r => setTimeout(r, 250))
+          }
+
+          result = {
+            message: `${receipt.merchant || 'Receipt'} · split €${total.toFixed(2)} (€${perPerson.toFixed(2)} each${contacts.length ? ` × ${contacts.length}` : ''})`,
+            receipt,
+            attachmentId,
+          }
+          break
+        }
+
+        case 'RECEIPT_LOG': {
+          // "Categorise & file" — no money moves, but we upload the image so
+          // the activity log row carries the bill, and we tag a category on
+          // the entry. The action survives in actionLog with full undo.
+          const receipt = action.receipt || {}
+          const total   = Number(action.amount ?? receipt.total ?? 0)
+          if (!total) throw new Error('Receipt has no total to log')
+
+          let attachmentId = null
+          if (action.imageBase64) {
+            try {
+              const att = await bunqAPI.uploadAttachment(undefined, action.imageBase64, `${receipt.merchant || 'Receipt'} · €${total.toFixed(2)}`)
+              attachmentId = att?.id || att?.uuid || null
+            } catch (e) {
+              console.warn('[receipt] attachment upload failed, continuing without:', e.message)
+            }
+          } else {
+            await new Promise(r => setTimeout(r, 200))
+          }
+
+          result = {
+            message: `Filed €${total.toFixed(2)} from ${receipt.merchant || 'receipt'} · ${receipt.category || 'Other'}`,
+            receipt,
+            attachmentId,
+            category: receipt.category || 'Other',
+          }
+          break
+        }
+
         case 'SAVINGS_BOOST': {
           const saveAmt = Number(action.amount || 0)
           if (!saveAmt) throw new Error('Savings amount missing or zero')
@@ -628,6 +700,37 @@ export const useAetherStore = create((set, get) => ({
   },
 
   clearUndo: () => set({ pendingUndo: null }),
+
+  /**
+   * Undo a specific action-log entry by id. Used by per-row undo on the
+   * receipts summary, where each receipt is its own dispatchable action and
+   * each one needs an independent undo button (vs. the singleton 10s
+   * pendingUndo bar). Restores the snapshot saved on the entry itself.
+   */
+  undoActionById: async (entryId) => {
+    const { actionLog } = get()
+    const entry = actionLog.find(e => e.id === entryId)
+    if (!entry || entry.status === 'undone') return false
+
+    const snap = entry.snapshot
+    if (snap) {
+      set({
+        accounts:    snap.accounts ?? get().accounts,
+        cardBlocked: snap.cardBlocked ?? get().cardBlocked,
+        goals:       snap.goals ?? get().goals,
+      })
+    }
+    set({
+      actionLog: get().actionLog.map(e =>
+        e.id === entryId ? { ...e, status: 'undone' } : e
+      ),
+      // If this was also the pendingUndo entry, clear it.
+      pendingUndo: get().pendingUndo?.entryId === entryId ? null : get().pendingUndo,
+    })
+    memoryAPI.logAction(actionPayload({ ...entry, status: 'undone' }))
+    get().refreshInsights()
+    return true
+  },
 
   dismissAction: (id) => {
     set(state => ({

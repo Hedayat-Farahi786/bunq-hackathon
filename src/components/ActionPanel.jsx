@@ -22,12 +22,22 @@ export default function ActionPanel({ actions, accounts = [], goals = [], onActi
   const [editing, setEditing]     = useState(null)
 
   const [overrides, setOverrides] = useState(() =>
-    Object.fromEntries(actions.map((a, i) => [i, {
-      amount:      Number(a.params?.amount ?? a.amount ?? 0) || 0,
-      fromAccount: a.params?.fromAccount ?? accounts[0]?.id ?? null,
-      toAccount:   a.params?.toAccount   ?? null,
-      toLabel:     a.params?.toLabel     ?? a.params?.goalLabel ?? null,
-    }]))
+    Object.fromEntries(actions.map((a, i) => {
+      let amount = Number(a.params?.amount ?? a.amount ?? 0) || 0
+      // For splits, ensure amount is the TOTAL, not perPerson
+      if (a.type === 'PAYMENT_REQUEST' && a.params?.perPerson) {
+        const pp = Number(a.params.perPerson)
+        const np = Number(a.params.numPeople || 2)
+        const total = pp * np
+        if (total > amount) amount = total
+      }
+      return [i, {
+        amount,
+        fromAccount: a.params?.fromAccount ?? accounts[0]?.id ?? null,
+        toAccount:   a.params?.toAccount   ?? null,
+        toLabel:     a.params?.toLabel     ?? a.params?.goalLabel ?? null,
+      }]
+    }))
   )
 
   const contactList = useMemo(() => storeContacts?.length ? storeContacts : [
@@ -57,7 +67,9 @@ export default function ActionPanel({ actions, accounts = [], goals = [], onActi
     }
     if (action.type === 'PAYMENT_REQUEST' && selected.length > 0) {
       enriched.contacts = selected
-      enriched.amount = o.amount > 0 ? o.amount / (selected.length + 1) : Number(action.params?.perPerson || 0)
+      // Send the TOTAL amount — the store divides per contact
+      enriched.amount = o.amount > 0 ? o.amount : Number(action.params?.amount || 0)
+      enriched.perPerson = enriched.amount / (selected.length + 1)
     }
     await onAction(enriched)
     setExecuting(null)
@@ -112,9 +124,8 @@ export default function ActionPanel({ actions, accounts = [], goals = [], onActi
                   <div className="ap-icon"><Icon size={16} /></div>
                   <div className="ap-item-body">
                     <div className="ap-item-title">{action.label}</div>
-                    {action.reason && <p className="ap-item-reason">{action.reason}</p>}
                   </div>
-                  {(isMoney || isSplit) && (
+                  {isMoney && (
                     <button className="ap-edit-btn" onClick={() => setEditing(isEditing ? null : i)}>
                       {isEditing ? <Check size={13} /> : <Edit3 size={13} />}
                     </button>
@@ -180,7 +191,7 @@ export default function ActionPanel({ actions, accounts = [], goals = [], onActi
                     </div>
                     {selected.length > 0 && o.amount > 0 && (
                       <div className="ap-split-result">
-                        <span>€{(o.amount / (selected.length + 1)).toFixed(2)} each</span>
+                        <span>€{o.amount.toFixed(2)} total · €{(o.amount / (selected.length + 1)).toFixed(2)} each</span>
                         <span className="ap-split-sub">you + {selected.length} other{selected.length !== 1 ? 's' : ''}</span>
                       </div>
                     )}

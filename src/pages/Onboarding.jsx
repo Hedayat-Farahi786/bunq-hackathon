@@ -14,7 +14,7 @@ const SLIDES = [
   {
     kind: 'feature',
     icon: Eye,
-    color: 'linear-gradient(135deg, #1a56db, #3b82f6)',
+    color: 'linear-gradient(135deg, #ff7819, #ff9042)',
     title: 'See the real cost',
     desc:  'Point your camera at a receipt, price tag or menu. Aether reads the numbers and tells you if it fits your week — before you pay.',
     bullet: 'Groceries · Receipts · Price tags',
@@ -22,7 +22,7 @@ const SLIDES = [
   {
     kind: 'feature',
     icon: Mic,
-    color: 'linear-gradient(135deg, #059669, #10b981)',
+    color: 'linear-gradient(135deg, #34d399, #3db8ad)',
     title: 'Just say it',
     desc:  '"Move €200 to savings." "Split dinner with Emma." "Am I overspending this month?" Talk like you would to a friend — Aether handles the steps.',
     bullet: 'Voice · Natural language · No menus',
@@ -30,7 +30,7 @@ const SLIDES = [
   {
     kind: 'feature',
     icon: ShieldCheck,
-    color: 'linear-gradient(135deg, #7c3aed, #a855f7)',
+    color: 'linear-gradient(135deg, #8b5cf6, #d156dd)',
     title: 'You stay in control',
     desc:  'Aether never moves money without your tap. Every action has a 10-second undo and a full log so you can see exactly what changed.',
     bullet: 'Confirm · Undo · Full transparency',

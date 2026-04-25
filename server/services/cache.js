@@ -99,7 +99,7 @@ export function buildCacheKey({ provider, userId, userMessage, imageBase64, fina
     .update('|')
     .update(userId || 'single-user')
     .update('|')
-    .update(sessionId || '')
+    .update(imageBase64 ? (sessionId || '') : '')
     .update('|')
     .update(normaliseText(userMessage))
     .update('|')
