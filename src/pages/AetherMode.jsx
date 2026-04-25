@@ -302,11 +302,35 @@ const STATUS_COLORS = {
 }
 
 const THINKING_LINES = [
-  'Thinking…',
-  'Reading the scene…',
-  'Crunching the numbers…',
-  'One sec…',
+  'Understanding your question',
+  'Analysing your finances',
+  'Looking at the bigger picture',
+  'Connecting the dots',
+  'Preparing your answer',
 ]
+
+function ThinkingText({ activity }) {
+  const [idx, setIdx] = React.useState(0)
+  React.useEffect(() => {
+    if (activity) return
+    const t = setInterval(() => setIdx(i => (i + 1) % THINKING_LINES.length), 2500)
+    return () => clearInterval(t)
+  }, [activity])
+  const text = activity ? `${activity}…` : `${THINKING_LINES[idx]}…`
+  return (
+    <AnimatePresence mode="wait">
+      <motion.span
+        key={text}
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -4 }}
+        transition={{ duration: 0.2 }}
+      >
+        {text}
+      </motion.span>
+    </AnimatePresence>
+  )
+}
 
 export default function AetherMode() {
   const videoRef  = useRef(null)
@@ -381,38 +405,37 @@ export default function AetherMode() {
   const [detected, setDetected]           = useState(false) // true once locked — fades out scanning UI
 
   // ── Camera lifecycle ─────────────────────────────────────────
-  useEffect(() => {
-    let cancelled = false
-    setAetherActive(true)
+  const startCamera = useCallback(async () => {
     setCamReady(false)
-
-    const start = async () => {
-      try {
-        setCamError(null)
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false,
-        })
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
-        streamRef.current?.getTracks().forEach(t => t.stop())
-        streamRef.current = stream
-        const v = videoRef.current
-        if (v) {
-          v.srcObject = stream
-          v.onloadedmetadata = () => {
-            if (cancelled) return
-            v.play().catch(() => {})
-            setCamReady(true)
-          }
-        }
-      } catch (err) {
-        if (!cancelled) setCamError("Camera's off — but you can still ask me anything")
+    setCamError(null)
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error('Camera requires HTTPS'), { name: 'NotSupportedError' })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      })
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      streamRef.current = stream
+      const v = videoRef.current
+      if (v) {
+        v.srcObject = stream
+        v.onloadedmetadata = () => { v.play().catch(() => {}); setCamReady(true) }
       }
+    } catch (err) {
+      console.warn('[Camera] failed:', err.name, err.message)
+      setCamError(
+        err.name === 'NotAllowedError' ? 'Camera permission denied'
+        : err.name === 'NotFoundError' ? 'No camera found'
+        : err.name === 'NotSupportedError' ? 'Camera requires HTTPS'
+        : 'Camera unavailable'
+      )
     }
-    start()
+  }, [facing])
 
+  useEffect(() => {
+    setAetherActive(true)
+    startCamera()
     return () => {
-      cancelled = true
       streamRef.current?.getTracks().forEach(t => t.stop())
       streamRef.current = null
     }
@@ -664,24 +687,16 @@ export default function AetherMode() {
   // based on our own safe-to-spend math. If the user asked a specific
   // question ("should I buy this?"), we ALSO fire a full analyse call so a
   // richer reply follows with real actions attached.
-  const speakProductVerdict = useCallback((product, userQuestion, opts = {}) => {
+  const speakProductVerdict = useCallback((product, userQuestion) => {
     if (!product) return
     const price = Number(product.priceEstimate) || 0
     const aff   = affordabilityFor(price)
     const name  = product.name || 'it'
-    const deferReveal = !!opts.deferReveal
 
-    // Helper: reveal the product card together with whatever state we set
-    // alongside it, so both halves of the response land on the same tick.
-    const revealProduct = () => {
-      setFocusedProduct(product)
-      setDetected(true)
-    }
-
-    // Local instant reply — only when we're NOT deferring the reveal. If we
-    // are deferring, the user is waiting to hear Claude's full answer; a
-    // pre-emptive local one-liner would compete with the real reply.
-    if (!deferReveal && speakOn && price > 0) {
+    // Local one-liner only when there's NO follow-up question. With a question
+    // we're about to speak Claude's real answer — the canned line would just
+    // step on it.
+    if (!userQuestion && speakOn && price > 0) {
       const line = aff?.level === 'affordable' ? `That's a ${name}… about €${price}. You've got plenty of room for that.`
                  : aff?.level === 'tight'       ? `${name}, around €${price}. You can swing it — just a bit tight this month.`
                  : aff?.level === 'stretch'     ? `Hmm, ${name} at €${price}. That'd be a stretch. Want me to check your savings?`
@@ -716,44 +731,26 @@ Answer their actual question with specific numbers from their profile. If the pr
         },
       }).then(result => {
         if (!result) {
-          if (deferReveal) {
-            revealProduct()
-            setIsAnalyzing(false)
-            setActivity(null)
-          }
+          setIsAnalyzing(false)
+          setActivity(null)
           return
         }
-        // Speak Claude's reply now (only when we deferred — otherwise the
-        // local one-liner already filled this slot above).
-        if (deferReveal && speakOn && result.voiceResponse) {
+        if (speakOn && result.voiceResponse) {
           speak(result.voiceResponse, {
             onStart: () => setIsSpeaking(true),
             onEnd:   () => setIsSpeaking(false),
           })
         }
-        if (deferReveal) revealProduct()
         setCurrentAnalysis(result)
         const allActions = Array.isArray(result.recommendedActions) ? result.recommendedActions : []
         setActions(allActions)
-        if (deferReveal) {
-          setIsAnalyzing(false)
-          setActivity(null)
-        }
+        setIsAnalyzing(false)
+        setActivity(null)
       }).catch(err => {
         console.warn('[Aether] identify follow-up failed:', err.message)
-        if (deferReveal) {
-          // On error still reveal the product card so the user isn't stuck
-          // staring at a viewfinder forever.
-          revealProduct()
-          setIsAnalyzing(false)
-          setActivity(null)
-        }
+        setIsAnalyzing(false)
+        setActivity(null)
       })
-    } else if (deferReveal) {
-      // No question but somehow deferReveal got set — release the hold.
-      revealProduct()
-      setIsAnalyzing(false)
-      setActivity(null)
     }
   }, [speakOn, user, accounts, goals, spendingPatterns, transactions, cardBlocked, sts])
 
@@ -805,10 +802,11 @@ Answer their actual question with specific numbers from their profile. If the pr
         return
       }
 
-      // Got a product — lock it. If the user asked a question alongside,
-      // HOLD the product-card reveal until the analyse response lands so
-      // both pop in together (avoids the awkward 3-5s gap on mobile where
-      // the card appears, then the reply card slides in much later).
+      // Got a product — lock it and reveal the card immediately so the user
+      // gets visual confirmation that detection landed. If a question was
+      // asked alongside, the reply card spins in "thinking…" mode while the
+      // /analyse call resolves, and the product card carries a subtle
+      // skeleton-shimmer line until the verdict arrives.
       if (best && newConf > 0) {
         setProducts([best])
         bestConfRef.current = newConf
@@ -819,17 +817,14 @@ Answer their actual question with specific numbers from their profile. If the pr
         const pendingQ = pendingIdentifyQRef.current
         pendingIdentifyQRef.current = null
 
+        setFocusedProduct(best)
+        setDetected(true)
+
         if (pendingQ) {
-          // Defer the product-card reveal — speakProductVerdict will set it
-          // when the /analyse call resolves, so the product card + the
-          // reply card animate in on the same React tick.
           setIsAnalyzing(true)
           setActivity('Checking your numbers')
-          speakProductVerdict(best, pendingQ, { deferReveal: true })
+          speakProductVerdict(best, pendingQ)
         } else {
-          // No question — reveal immediately as before.
-          setFocusedProduct(best)
-          setDetected(true)
           speakProductVerdict(best, null)
         }
         return
@@ -867,21 +862,6 @@ Answer their actual question with specific numbers from their profile. If the pr
 
   // Keep ref in sync so ask() can call it without a stale-closure dependency
   useEffect(() => { startIdentifyModeRef.current = startIdentifyMode }, [startIdentifyMode])
-
-  const stopIdentifyMode = useCallback(() => {
-    cancelledRef.current  = true
-    bestConfRef.current   = 0
-    consistentRef.current = 0
-    setIdentifyMode(false)
-    setDetected(false)
-    setProducts([])
-    setFocusedProduct(null)
-    setIdentifying(false)
-    if (scanTimeoutRef.current) {
-      clearTimeout(scanTimeoutRef.current)
-      scanTimeoutRef.current = null
-    }
-  }, [])
 
   const dismissDetected = useCallback(() => {
     bestConfRef.current = 0
@@ -1046,11 +1026,25 @@ Answer their actual question with specific numbers from their profile. If the pr
           <div className="camera-fallback">
             <div className="camera-grid" />
             {camError ? (
-              <>
-                <CameraIcon size={28} className="camera-fallback-icon" />
-                <div className="camera-error-msg">{camError}</div>
-                <div className="camera-error-sub">Try the suggestions or type your question below.</div>
-              </>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', position: 'absolute', inset: 0, padding: 32, textAlign: 'center' }}
+              >
+                <div style={{ width: 52, height: 52, borderRadius: 14, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}>
+                  <CameraIcon size={24} style={{ color: 'rgba(255,255,255,0.35)' }} />
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 6 }}>{camError}</div>
+                <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5, maxWidth: 240, marginBottom: 16 }}>
+                  Open your browser settings → Site permissions → Camera → Allow for this site, then reload.
+                </div>
+                <button
+                  onClick={() => window.location.reload()}
+                  style={{ background: '#0080ff', border: 'none', borderRadius: 12, padding: '10px 24px', color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  Reload page
+                </button>
+              </motion.div>
             ) : (
               <>
                 <motion.div
@@ -1082,24 +1076,6 @@ Answer their actual question with specific numbers from their profile. If the pr
               <span className={`scan-dot ${identifying ? 'active' : ''}`} />
               <span>{identifying ? 'Analysing…' : 'Point at a product'}</span>
             </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Cancel button */}
-        <AnimatePresence>
-          {identifyMode && !detected && !identifying && !isAnalyzing && (
-            <motion.button
-              key="stop-btn"
-              className="identify-stop-btn"
-              onClick={stopIdentifyMode}
-              whileTap={{ scale: 0.96 }}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6, transition: { duration: 0.35 } }}
-              aria-label="Cancel"
-            >
-              Cancel
-            </motion.button>
           )}
         </AnimatePresence>
 
@@ -1384,6 +1360,26 @@ Answer their actual question with specific numbers from their profile. If the pr
                 <span className="pcv2-afford-label">{focusedAffordability.label}</span>
               </div>
             )}
+
+            {/* Skeleton shimmer — shown while the verdict is still cooking so
+                the card doesn't feel "frozen". Replaced by the real reply card
+                contents once the analyse response lands. */}
+            <AnimatePresence initial={false}>
+              {isAnalyzing && !currentAnalysis && (
+                <motion.div
+                  key="pcv2-skeleton"
+                  className="pcv2-skeleton"
+                  initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                  animate={{ opacity: 1, height: 'auto', marginTop: 4 }}
+                  exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                  transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+                  aria-hidden="true"
+                >
+                  <span className="pcv2-skeleton-line pcv2-skeleton-line--long" />
+                  <span className="pcv2-skeleton-line pcv2-skeleton-line--short" />
+                </motion.div>
+              )}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1414,7 +1410,7 @@ Answer their actual question with specific numbers from their profile. If the pr
               transition={{ duration: 0.2 }}
             >
               <span className="reply-orb reply-orb-spin"><img src="/aether-icon.svg" alt="" className="reply-orb-img" /></span>
-              <span>{activity || THINKING_LINES[Math.floor(Date.now() / 3000) % THINKING_LINES.length]}{activity ? '…' : ''}</span>
+              <ThinkingText activity={activity} />
             </motion.div>
           ) : currentAnalysis?.voiceResponse ? (
             <motion.div key={currentAnalysis.voiceResponse} className="aether-reply"

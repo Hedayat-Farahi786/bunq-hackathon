@@ -57,8 +57,8 @@ export default function Settings() {
       {/* ── Header ────────────────────────────────────────── */}
       <header className="setx-header">
         <p className="setx-eyebrow">Settings</p>
-        <h1 className="setx-title">Make Aether yours</h1>
-        <p className="setx-sub">Tune what Aether can do, how alert it is, and which engine powers it.</p>
+        <h1 className="setx-title">Settings</h1>
+        <p className="setx-sub">Customize your Aether experience.</p>
       </header>
 
       {/* ── Identity card ─────────────────────────────────── */}
@@ -97,97 +97,14 @@ export default function Settings() {
         </div>
       </Section>
 
-      {/* ── AI brain ──────────────────────────────────────── */}
+      {/* ── AI brain — commented out for now
       <Section icon={<Wand2 size={14} />} title="Aether's brain" hint="Which AI does the thinking">
-        <div className="setx-card setx-radio-group">
-          {PROVIDERS.map(p => {
-            const status = providerStatus?.[p.id]
-            const available = p.id === 'auto' ? true : status?.available
-            const selected  = selectedProvider === p.id
-            return (
-              <button
-                key={p.id}
-                className={`setx-radio ${selected ? 'is-selected' : ''}`}
-                onClick={() => handleProviderChange(p.id)}
-              >
-                <span className={`setx-radio-dot ${selected ? 'is-on' : ''}`}>
-                  {selected && <span className="setx-radio-dot-inner" />}
-                </span>
-                <span className="setx-radio-body">
-                  <span className="setx-radio-title">{p.label}</span>
-                  <span className="setx-radio-sub">{p.desc}</span>
-                </span>
-                <span className="setx-radio-status">
-                  {loadingProviders && p.id !== 'auto' ? (
-                    <Loader size={13} className="spin" />
-                  ) : p.id === 'auto' ? (
-                    <Sparkles size={13} className="setx-radio-status-spark" />
-                  ) : available ? (
-                    <CheckCircle2 size={14} className="setx-radio-status-ok" />
-                  ) : (
-                    <XCircle size={14} className="setx-radio-status-off" />
-                  )}
-                </span>
-              </button>
-            )
-          })}
-        </div>
+        ...
       </Section>
+      ── */}
 
       {/* ── Autonomy ──────────────────────────────────────── */}
-      <Section icon={<Sparkles size={14} />} title="What Aether can do on its own" hint="Turn off anything that feels too much">
-        <div className="setx-card">
-          <Toggle
-            icon={<Snowflake size={14} />}
-            title="Freeze my card when I'm tempted"
-            sub="Aether spots impulsive moments and locks your card briefly"
-            on={prefs.autoBlock}
-            onChange={() => updatePrefs({ autoBlock: !prefs.autoBlock })}
-          />
-          <Toggle
-            icon={<PiggyBank size={14} />}
-            title="Sweep spare cash to savings"
-            sub="On good weeks, move a little towards your goals — no questions asked"
-            on={prefs.autoSave}
-            onChange={() => updatePrefs({ autoSave: !prefs.autoSave })}
-          />
-          <Toggle
-            icon={<Bell size={14} />}
-            title="Gentle nudges"
-            sub="Quiet notifications when something needs your attention"
-            on={prefs.notifications}
-            onChange={() => updatePrefs({ notifications: !prefs.notifications })}
-          />
-        </div>
-      </Section>
-
-      {/* ── Tuning ────────────────────────────────────────── */}
-      <Section icon={<Gauge size={14} />} title="Tuning" hint="How alert Aether is">
-        <div className="setx-card">
-          <div className="setx-row">
-            <div className="setx-row-body">
-              <div className="setx-row-title">Intervene when risk is</div>
-              <div className="setx-row-sub">Aether only speaks up above this level</div>
-            </div>
-            <Seg
-              value={prefs.riskThreshold}
-              onChange={(v) => updatePrefs({ riskThreshold: v })}
-              options={RISK_OPTS}
-            />
-          </div>
-          <div className="setx-row">
-            <div className="setx-row-body">
-              <div className="setx-row-title">Scan every</div>
-              <div className="setx-row-sub">How often the camera looks in Aether Mode</div>
-            </div>
-            <Seg
-              value={String(prefs.scanInterval)}
-              onChange={(v) => updatePrefs({ scanInterval: +v })}
-              options={SCAN_OPTS}
-            />
-          </div>
-        </div>
-      </Section>
+      {/* ── Autonomy and Tuning removed — prefs not wired to real behavior ── */}
 
       {/* ── Reassurance ───────────────────────────────────── */}
       <div className="setx-reassure">

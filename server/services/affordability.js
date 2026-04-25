@@ -466,11 +466,12 @@ export function buildJudgment({ financialContext: ctx = {}, voiceText = '', inte
     })
     // What-if forecast — landing balance with vs without the purchase
     if (forecastIfBuy && forecast.remainingDays > 0) {
-      const delta = forecastIfBuy.projectedEnd - forecast.projectedEnd
+      const delta = Math.abs(Math.round(forecastIfBuy.projectedEnd - forecast.projectedEnd))
+      const horizon = dtp != null ? 'payday' : 'month-end'
       reasoning.push({
-        label: `By ${dtp != null ? 'payday' : 'month-end'} with this`,
+        label: `By ${horizon} with this`,
         value: `${forecastIfBuy.projectedEnd >= 0 ? '€' : '−€'}${Math.abs(forecastIfBuy.projectedEnd).toFixed(0)}`,
-        detail: `vs €${forecast.projectedEnd.toFixed(0)} without (Δ €${Math.round(delta)})`,
+        detail: `€${delta} less than if you skipped it (you'd land at €${forecast.projectedEnd.toFixed(0)} otherwise)`,
         tone: forecastIfBuy.projectedEnd < buffer ? 'over' : forecastIfBuy.projectedEnd < buffer + 100 ? 'tight' : 'easy',
       })
     }

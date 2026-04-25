@@ -74,7 +74,7 @@ export default function ActionLog() {
             <p className="logx-sub">Every action, with full transparency · undo any of them within 10s.</p>
           </div>
           <div className="logx-orb">
-            <Sparkles size={18} />
+            <img src="/aether-icon.svg" alt="Aether" style={{ width: 24, height: 24 }} />
           </div>
         </header>
 

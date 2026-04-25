@@ -44,7 +44,7 @@ export default function Dashboard() {
   const navigate = useNavigate()
   const {
     user, accounts, transactions, cardBlocked,
-    goals, spendingPatterns, insights,
+    contacts, goals, spendingPatterns, insights,
     forecast, safeToSpend: sts, balanceSeries,
     getTotalBalance, dispatchAction, sandboxLoaded,
     roundUpPool, theme, setTheme,
@@ -59,6 +59,13 @@ export default function Dashboard() {
   const [analyzing, setAnalyzing]  = useState(false)
   const [activeAcct, setActiveAcct] = useState(0)
   const [liveTranscript, setLiveTranscript] = useState('')
+  const [showPayForm, setShowPayForm] = useState(false)
+  const [showRequestForm, setShowRequestForm] = useState(false)
+  const [payIban, setPayIban] = useState('')
+  const [payAmount, setPayAmount] = useState('')
+  const [payDesc, setPayDesc] = useState('')
+  const [reqAmount, setReqAmount] = useState('')
+  const [reqContact, setReqContact] = useState('')
 
   const total = getTotalBalance()
   const now   = new Date()
@@ -123,11 +130,9 @@ export default function Dashboard() {
   const handleQuickAction = (key) => {
     switch (key) {
       case 'pay':
-        handleVoice('I want to send money to a contact'); break
+        setShowPayForm(true); break
       case 'request':
-        handleVoice('Send a payment request to someone'); break
-      case 'move':
-        handleVoice('Move money between my accounts'); break
+        setShowRequestForm(true); break
       case 'card':
         handleBlockCard(); break
       case 'save': {
@@ -135,14 +140,26 @@ export default function Dashboard() {
         if (sweepAmt > 0 && goals?.[0]) {
           handleAction({ type: 'ROUND_UP_SWEEP', amount: sweepAmt, goalId: goals[0].id, goalLabel: goals[0].name, label: `Sweep €${sweepAmt} → ${goals[0].name}` })
         } else {
-          handleVoice('Help me save money toward my goal'); break
+          handleVoice('Help me save money toward my goal')
         }
         break
       }
-      case 'split':
-        handleVoice('Split a bill with my friends'); break
       default: break
     }
+  }
+
+  const handlePay = async () => {
+    if (!payIban || !payAmount) return
+    const res = await dispatchAction({ type: 'TRANSFER', toIban: payIban, amount: Number(payAmount), description: payDesc || 'Payment', label: `Pay €${payAmount}` })
+    if (res.success) { toast.success(res.result.message); setShowPayForm(false); setPayIban(''); setPayAmount(''); setPayDesc('') }
+    else toast.error(res.error)
+  }
+
+  const handleRequest = async () => {
+    if (!reqAmount || !reqContact) return
+    const res = await dispatchAction({ type: 'PAYMENT_REQUEST', amount: Number(reqAmount), contacts: [{ alias: reqContact }], description: 'Payment request', label: `Request €${reqAmount}` })
+    if (res.success) { toast.success(res.result.message); setShowRequestForm(false); setReqAmount(''); setReqContact('') }
+    else toast.error(res.error)
   }
 
   const activeAccount = accounts[activeAcct] || accounts[0]
@@ -156,10 +173,8 @@ export default function Dashboard() {
   const QUICK_ACTIONS = [
     { key: 'pay',     icon: Send,           label: 'Pay'     },
     { key: 'request', icon: ArrowDownLeft,  label: 'Request' },
-    { key: 'move',    icon: ArrowLeftRight, label: 'Move'    },
     { key: 'card',    icon: cardBlocked ? Lock : Snowflake, label: cardBlocked ? 'Unfreeze' : 'Freeze' },
     { key: 'save',    icon: PiggyBank,      label: 'Save'    },
-    { key: 'split',   icon: Users,          label: 'Split'   },
   ]
 
   return (
@@ -189,9 +204,6 @@ export default function Dashboard() {
               <span className="db-icon-dot" />
             </button>
           )}
-          <button className="db-icon-btn" onClick={() => setTheme(dark ? 'light' : 'dark')} aria-label="Toggle theme">
-            {dark ? <Sun size={16} /> : <Moon size={16} />}
-          </button>
           <button className="db-icon-btn" onClick={() => navigate('/settings')} aria-label="Settings">
             <Settings size={16} />
           </button>
@@ -322,7 +334,7 @@ export default function Dashboard() {
                 onClick={() => handleQuickAction(key)}
                 whileTap={{ scale: 0.94 }}
               >
-                <span className="db-qa-icon"><Icon size={18} strokeWidth={1.8} /></span>
+                <span className="db-qa-icon"><Icon size={16} strokeWidth={1.8} /></span>
                 <span className="db-qa-label">{label}</span>
               </motion.button>
             ))}
@@ -346,7 +358,6 @@ export default function Dashboard() {
               <span className="db-aether-status">{analyzing ? 'Thinking…' : 'Ask anything about your money'}</span>
             </span>
             <span className="db-aether-cta">
-              <Sparkles size={14} />
               <span>Open</span>
             </span>
           </motion.button>
@@ -532,14 +543,10 @@ export default function Dashboard() {
                   return (
                     <div key={g.id} className={`db-goal ${done ? 'is-done' : ''}`}>
                       <div className="db-goal-head">
-                        <span className="db-goal-emoji">{g.icon || '🎯'}</span>
                         <div className="db-goal-info">
                           <span className="db-goal-name">{g.name}</span>
                           <span className="db-goal-sub">
-                            {done ? '✓ Reached' : `€${remaining.toLocaleString('nl-NL')} to go`}
-                            {paceLabel && (
-                              <span className={`db-goal-pace is-${p.status}`}>{paceLabel}</span>
-                            )}
+                            €{g.current.toLocaleString('nl-NL')} of €{g.target.toLocaleString('nl-NL')}
                           </span>
                         </div>
                         <span className="db-goal-pct">{pct}%</span>
@@ -622,6 +629,51 @@ export default function Dashboard() {
         {showPanel && (
           <ActionPanel actions={pending} analysis={analysis} accounts={accounts} goals={goals}
             onAction={handleAction} onDismiss={() => setShowPanel(false)} />
+        )}
+      </AnimatePresence>
+
+      {/* Pay Form */}
+      <AnimatePresence>
+        {showPayForm && (
+          <motion.div className="db-sheet-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowPayForm(false)}>
+            <motion.div className="db-sheet" initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 300 }} onClick={e => e.stopPropagation()}>
+              <div className="db-sheet-handle" />
+              <h3 className="db-sheet-title">Pay</h3>
+              <div className="db-sheet-fields">
+                <input className="db-sheet-input" placeholder="IBAN" value={payIban} onChange={e => setPayIban(e.target.value)} />
+                <input className="db-sheet-input" placeholder="Amount (€)" type="number" inputMode="decimal" value={payAmount} onChange={e => setPayAmount(e.target.value)} />
+                <input className="db-sheet-input" placeholder="Description (optional)" value={payDesc} onChange={e => setPayDesc(e.target.value)} />
+                <button className="db-sheet-btn" onClick={handlePay} disabled={!payIban || !payAmount}>Send payment</button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Request Form */}
+      <AnimatePresence>
+        {showRequestForm && (
+          <motion.div className="db-sheet-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowRequestForm(false)}>
+            <motion.div className="db-sheet" initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 300 }} onClick={e => e.stopPropagation()}>
+              <div className="db-sheet-handle" />
+              <h3 className="db-sheet-title">Request</h3>
+              <div className="db-sheet-fields">
+                <input className="db-sheet-input" placeholder="Amount (€)" type="number" inputMode="decimal" value={reqAmount} onChange={e => setReqAmount(e.target.value)} />
+                {contacts?.length > 0 && (
+                  <div className="db-sheet-contacts">
+                    {contacts.map(c => (
+                      <button key={c.id} className={`db-sheet-contact ${reqContact === c.alias ? 'active' : ''}`} onClick={() => setReqContact(c.alias)}>
+                        <span className="db-sheet-contact-avatar">{c.name?.[0]}</span>
+                        <span className="db-sheet-contact-name">{c.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <input className="db-sheet-input" placeholder="Or enter email/phone" value={reqContact} onChange={e => setReqContact(e.target.value)} />
+                <button className="db-sheet-btn" onClick={handleRequest} disabled={!reqAmount || !reqContact}>Send request</button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
