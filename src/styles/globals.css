@@ -3106,6 +3106,155 @@ img, video { max-width: 100%; display: block; }
   line-height: 1.45;
 }
 
+/* "Why" toggle in the reply header — collapses the reasoning trace,
+   which is on by default on laptop and off by default on mobile. */
+.reply-reasoning-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.55);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.reply-reasoning-toggle:hover {
+  background: rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.85);
+  border-color: rgba(255,255,255,0.18);
+}
+.reply-reasoning-toggle.open {
+  background: rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.85);
+}
+.reply-reasoning-toggle svg { display: block; }
+
+/* ── Reasoning trace ───────────────────────────────────────────
+   Receipt-style breakdown of how the verdict was reached.
+   No coloured side-bars — the verdict pill carries the tone, the
+   numbers carry the meaning. Premium chrome, hairline separators,
+   tabular numerics so the column reads like a real ledger.        */
+
+.reply-judgment {
+  margin-top: 4px;
+  padding: 11px 13px 10px;
+  border-radius: 13px;
+  background: rgba(255,255,255,0.035);
+  border: 1px solid rgba(255,255,255,0.07);
+  position: relative;
+  overflow: hidden;
+}
+/* Subtle verdict tint on the background — present but never dominant.
+   Sits behind the content, so text colour never has to fight it.   */
+.reply-judgment::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0.55;
+}
+.reply-judgment--easy::before          { background: radial-gradient(120% 80% at 100% 0%, rgba(80,200,140,0.10), transparent 60%); }
+.reply-judgment--tight::before         { background: radial-gradient(120% 80% at 100% 0%, rgba(255,180,90,0.10), transparent 60%); }
+.reply-judgment--over::before          { background: radial-gradient(120% 80% at 100% 0%, rgba(255,110,110,0.13), transparent 60%); }
+.reply-judgment--general-tight::before { background: radial-gradient(120% 80% at 100% 0%, rgba(255,180,90,0.08), transparent 60%); }
+.reply-judgment--general-spike::before { background: radial-gradient(120% 80% at 100% 0%, rgba(255,150,90,0.10), transparent 60%); }
+
+/* Header: small label + verdict pill, end-aligned */
+.reply-judgment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  position: relative;
+  z-index: 1;
+}
+.reply-judgment-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(255,255,255,0.42);
+}
+.reply-judgment-verdict {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: rgba(255,255,255,0.7);
+  white-space: nowrap;
+}
+.reply-judgment--easy   .reply-judgment-verdict { background: rgba(80,200,140,0.16);  border-color: rgba(80,200,140,0.30);  color: rgb(160,230,180); }
+.reply-judgment--tight  .reply-judgment-verdict { background: rgba(255,180,90,0.16);  border-color: rgba(255,180,90,0.32);  color: rgb(255,205,140); }
+.reply-judgment--over   .reply-judgment-verdict { background: rgba(255,110,110,0.18); border-color: rgba(255,110,110,0.36); color: rgb(255,160,160); }
+.reply-judgment--general-tight .reply-judgment-verdict { background: rgba(255,180,90,0.14);  border-color: rgba(255,180,90,0.28);  color: rgb(255,205,140); }
+.reply-judgment--general-spike .reply-judgment-verdict { background: rgba(255,150,90,0.16);  border-color: rgba(255,150,90,0.32);  color: rgb(255,180,140); }
+
+/* Rows: dl/dt/dd ledger layout, hairline separators, tabular numerics */
+.reply-judgment-rows {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 1;
+}
+.reply-judgment-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  column-gap: 10px;
+  padding: 4px 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.62);
+  line-height: 1.45;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.reply-judgment-row:first-child { border-top: none; padding-top: 2px; }
+.reply-judgment-row-label {
+  margin: 0;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.reply-judgment-row-value {
+  margin: 0;
+  font-weight: 600;
+  color: rgba(255,255,255,0.78);
+  font-feature-settings: 'tnum' 1;
+}
+.reply-judgment-row-detail {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: rgba(255,255,255,0.36);
+  margin-top: 1px;
+  letter-spacing: 0.005em;
+}
+.reply-judgment-row.is-emphasised {
+  padding: 6px 0;
+}
+.reply-judgment-row.is-emphasised .reply-judgment-row-label,
+.reply-judgment-row.is-emphasised .reply-judgment-row-value {
+  color: rgba(255,255,255,0.95);
+  font-weight: 700;
+  font-size: 12.5px;
+}
+.reply-judgment-row.tone-easy  .reply-judgment-row-value { color: rgb(150,230,170); }
+.reply-judgment-row.tone-tight .reply-judgment-row-value { color: rgb(255,205,140); }
+.reply-judgment-row.tone-over  .reply-judgment-row-value { color: rgb(255,160,160); }
+.reply-judgment-row.tone-info  .reply-judgment-row-value { color: rgba(170,200,255,0.85); }
+
 /* Action chips inside the reply card */
 .reply-action-chips {
   display: flex;
@@ -4397,36 +4546,39 @@ img, video { max-width: 100%; display: block; }
   100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
 }
 
-/* ── Cancel / stop button ─────────────────────────────────────── */
+/* ── Cancel / stop button ───────────────────────────────────────
+   Sits just below the scan-indicator pill on mobile so it groups
+   visually with the scanning UI and never fights the reply card or
+   the input pill. Becomes a top-right pill on laptop.            */
 .identify-stop-btn {
   position: absolute;
-  bottom: calc(210px + env(safe-area-inset-bottom, 0px));
+  top: calc(106px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 6;
-  padding: 9px 22px;
-  border: 1px solid rgba(255,255,255,0.18);
+  padding: 6px 14px;
+  border: 1px solid rgba(255,255,255,0.16);
   border-radius: 999px;
   background: rgba(8,10,18,0.55);
   backdrop-filter: blur(16px);
-  color: rgba(255,255,255,0.75);
-  font-size: 13px;
+  -webkit-backdrop-filter: blur(16px);
+  color: rgba(255,255,255,0.7);
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
   letter-spacing: 0.01em;
-  transition: background 0.2s, color 0.2s;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
 }
 .identify-stop-btn:hover {
-  background: rgba(220,38,38,0.25);
+  background: rgba(220,38,38,0.22);
   border-color: rgba(220,38,38,0.4);
   color: #fca5a5;
 }
 
 @media (min-width: 768px) {
   .identify-stop-btn {
-    bottom: auto;
-    top: 16px;
+    top: 64px;
     right: 16px;
     left: auto;
     transform: none;
@@ -4439,14 +4591,20 @@ img, video { max-width: 100%; display: block; }
 
 .product-card-v2 {
   position: absolute;
-  left: 50%; bottom: calc(190px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
-  width: calc(100% - 28px);
-  max-width: 360px;
+  /* Mobile: sit just under the topbar (top-right), small, doesn't fight
+     the reply card or the mic. The bottom-center positioning collided
+     with the input row on phones.                                       */
+  top: calc(60px + env(safe-area-inset-top, 0px));
+  right: 12px;
+  bottom: auto;
+  left: auto;
+  transform: none;
+  width: calc(100% - 24px);
+  max-width: 240px;
   z-index: 5;
-  border-radius: 16px;
-  padding: 14px 16px 12px;
-  display: flex; flex-direction: column; gap: 10px;
+  border-radius: 13px;
+  padding: 9px 11px 8px;
+  display: flex; flex-direction: column; gap: 6px;
   background: linear-gradient(135deg, rgba(15,15,20,0.88) 0%, rgba(25,25,35,0.92) 100%);
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
@@ -4454,11 +4612,27 @@ img, video { max-width: 100%; display: block; }
   box-shadow: 0 4px 24px rgba(0,0,0,0.4), 0 0 0 0.5px rgba(255,255,255,0.06) inset;
   color: #fff;
 }
+.product-card-v2 .pcv2-name      { font-size: 12.5px; -webkit-line-clamp: 2; }
+.product-card-v2 .pcv2-price-main { font-size: 15px; }
+.product-card-v2 .pcv2-chip      { font-size: 9px; padding: 1px 5px; }
+.product-card-v2 .pcv2-top       { padding-right: 20px; gap: 7px; }
+.product-card-v2 .pcv2-close     { top: 5px; right: 5px; width: 17px; height: 17px; }
+.product-card-v2 .pcv2-detail    { font-size: 9.5px; }
+/* Laptop / desktop: a touch wider, slightly bigger numerics, more padding —
+   but the same top-right dock as mobile. Same idea, larger reading window. */
 @media (min-width: 768px) {
   .product-card-v2 {
-    bottom: auto; top: 72px; left: auto; right: 16px;
-    transform: none; width: 300px;
+    top: 64px;
+    right: 16px;
+    width: 264px;
+    max-width: 264px;
+    padding: 11px 13px 9px;
+    gap: 7px;
+    border-radius: 14px;
   }
+  .product-card-v2 .pcv2-name      { font-size: 13.5px; }
+  .product-card-v2 .pcv2-price-main { font-size: 17px; }
+  .product-card-v2 .pcv2-detail    { font-size: 10.5px; }
 }
 
 /* Close button */
@@ -5845,6 +6019,115 @@ img, video { max-width: 100%; display: block; }
 .db-goal-sub {
   font-size: 11.5px;
   color: var(--db-text-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.db-goal-pace {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(120,200,255,0.10);
+  border: 1px solid rgba(120,200,255,0.18);
+  color: rgba(170,210,255,0.85);
+  white-space: nowrap;
+}
+.db-goal-pace.is-late    { background: rgba(255,130,130,0.10); border-color: rgba(255,130,130,0.22); color: rgb(245,160,160); }
+.db-goal-pace.is-stalled { background: rgba(255,180,90,0.10);  border-color: rgba(255,180,90,0.22);  color: rgb(255,200,140); }
+.db-goal-pace.is-tight   { background: rgba(255,200,110,0.10); border-color: rgba(255,200,110,0.22); color: rgb(255,210,150); }
+
+/* ─── Looking ahead: predictive tile grid ─────────────────────── */
+.db-look-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 10px;
+}
+.db-look-tile {
+  position: relative;
+  padding: 12px 13px 11px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 88px;
+  overflow: hidden;
+}
+.db-look-tile.is-warn { background: rgba(255,180,90,0.05); border-color: rgba(255,180,90,0.18); }
+.db-look-tile-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--db-text-3);
+  margin: 0 0 3px;
+}
+.db-look-tile-value {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  color: var(--db-text-1);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+  line-height: 1.05;
+}
+.db-look-tile-suf {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--db-text-3);
+  letter-spacing: 0;
+}
+.db-look-tile-neg {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgb(255,140,140);
+  letter-spacing: 0;
+  margin-left: 4px;
+  text-transform: uppercase;
+}
+.db-look-tile-sub {
+  font-size: 11px;
+  color: var(--db-text-3);
+  margin: 2px 0 0;
+  line-height: 1.35;
+}
+.db-look-tile-warn {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(245,160,160);
+  line-height: 1.35;
+}
+.db-look-tile-ok {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(150,220,170);
+  line-height: 1.35;
+}
+.db-look-spark {
+  margin-top: auto;
+  padding-top: 6px;
+  margin-bottom: -4px;
+}
+.db-look-tile--cliff.is-shortfall {
+  background: rgba(255,110,110,0.06);
+  border-color: rgba(255,110,110,0.22);
+}
+.db-look-tile--cliff.is-tight {
+  background: rgba(255,180,90,0.06);
+  border-color: rgba(255,180,90,0.22);
+}
+.db-look-tile--cliff.is-covered {
+  background: rgba(120,200,150,0.05);
+  border-color: rgba(120,200,150,0.18);
 }
 .db-goal-pct {
   font-size: 13px;
@@ -6633,6 +6916,28 @@ img, video { max-width: 100%; display: block; }
   border-radius: 10px;
   padding: 6px 10px;
   margin: 8px 0 0;
+}
+
+.logx-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  font-weight: 500;
+  border-radius: 8px;
+  padding: 4px 9px;
+  margin: 8px 0 0;
+}
+.logx-warning--tight {
+  color: rgb(220,170,80);
+  background: rgba(255,200,110,0.10);
+  border: 1px solid rgba(255,200,110,0.22);
+}
+.logx-warning--over {
+  color: rgb(240,130,130);
+  background: rgba(248,113,113,0.10);
+  border: 1px solid rgba(248,113,113,0.25);
 }
 
 .logx-retry-btn {

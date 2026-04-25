@@ -6,7 +6,7 @@
  *  3. Auto-detection: first available provider
  */
 
-import { callClaude,  isClaudeAvailable  } from './claude.js'
+import { callClaude,  isClaudeAvailable, MODEL_VISION as CLAUDE_VISION_MODEL } from './claude.js'
 import { callGemini,  isGeminiAvailable  } from './gemini.js'
 import { callOllama,  isOllamaAvailable, getOllamaModels } from './ollama.js'
 import { SYSTEM_PROMPT } from '../prompts/financial.js'
@@ -119,7 +119,11 @@ export async function dispatchIdentify({ provider, userMessage, imageBase64 }) {
     const available = await p.check()
     if (!available) continue
     try {
-      const result = await p.call({ systemPrompt, userMessage, imageBase64 })
+      // Identify is vision-only product recognition — Haiku 4.5 is plenty.
+      // Other providers ignore the `model` arg entirely.
+      const callArgs = { systemPrompt, userMessage, imageBase64 }
+      if (name === 'claude') callArgs.model = CLAUDE_VISION_MODEL
+      const result = await p.call(callArgs)
       console.log(`[Identify:${name}] raw response:`, JSON.stringify(result).slice(0, 500))
       const normalised = normaliseIdentify(result)
       console.log(`[Identify:${name}] ${normalised.products.length} product(s) after normalisation`)
@@ -225,7 +229,8 @@ export async function getProviderStatus() {
     claude: {
       available:   claudeOk,
       label:       'Claude (Anthropic)',
-      model:       'claude-sonnet-4-6',
+      model:       'claude-sonnet-4-6',          // /analyse — reasoning + judgment
+      visionModel: 'claude-haiku-4-5',           // /identify — vision-only
       configured:  claudeOk,
     },
     gemini: {

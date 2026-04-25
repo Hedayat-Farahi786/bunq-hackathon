@@ -5,6 +5,7 @@ import { extractContacts, buildInsights } from '../services/insights'
 import {
   forecastMonth, safeToSpend, balanceSeries,
   roundUpPool, fraudRadar, goalAutopilot,
+  billCliff, goalPacing, subscriptionWaste,
 } from '../services/forecast'
 
 // Helper: extract the serialisable shape of an action for server mirroring
@@ -99,6 +100,9 @@ export const useAetherStore = create((set, get) => ({
   roundUpPool: { amount: 0, count: 0 },
   fraudFlags: [],
   autopilotPlan: null,
+  cliff: null,
+  pacing: [],
+  subBloat: null,
   aetherActive: false,
   voiceActive: false,
   actionLog: [],
@@ -194,6 +198,20 @@ export const useAetherStore = create((set, get) => ({
         })
       }
 
+      // Seed plausible savings goals if the user has none yet. The judgment
+      // engine needs goals with a real "current" balance to suggest pulling
+      // cushion from — without these, every "tight" call has the same single
+      // alternative ("wait for payday") and the demo feels thin.
+      if (get().goals.length === 0) {
+        set({
+          goals: [
+            { id: 'goal_japan',   icon: '🗾', name: 'Japan trip',     current: 320, target: 2400, deadline: '2026-09-30' },
+            { id: 'goal_emerg',   icon: '🛟', name: 'Emergency fund', current: 240, target: 1800 },
+            { id: 'goal_laptop',  icon: '💻', name: 'New laptop',     current: 90,  target: 1200, deadline: '2026-12-31' },
+          ],
+        })
+      }
+
       // Card loading with graceful fallback — if sandbox has no cards,
       // we still let the demo do block/unblock in "mock card mode".
       if (cardsRes.status === 'fulfilled') {
@@ -266,6 +284,9 @@ export const useAetherStore = create((set, get) => ({
     const roundUps  = roundUpPool({ transactions })
     const flags     = fraudRadar({ transactions })
     const plan      = goalAutopilot({ transactions, goals })
+    const cliff     = billCliff({ transactions, totalBalance, accounts })
+    const pacing    = goalPacing({ transactions, goals })
+    const subBloat  = subscriptionWaste({ transactions })
 
     // Lift the most urgent fraud flag into the insights feed
     const extra = []
@@ -313,6 +334,9 @@ export const useAetherStore = create((set, get) => ({
       roundUpPool: roundUps,
       fraudFlags: flags,
       autopilotPlan: plan,
+      cliff,
+      pacing,
+      subBloat,
     })
   },
 
@@ -372,12 +396,28 @@ export const useAetherStore = create((set, get) => ({
     const defaultAccountId = import.meta.env.VITE_BUNQ_ACCOUNT_ID || '3616391'
     const snapshot = JSON.parse(JSON.stringify({ accounts, cardBlocked: get().cardBlocked, goals: get().goals }))
 
+    // Pre-dispatch affordability check — never block the action (the user
+    // already tapped to confirm), but flag it on the entry so the UI/log
+    // can show "this leaves you at €X" and the trust story stays honest.
+    let warning = null
+    const sts = get().safeToSpend
+    const moveAmt = Number(action.amount ?? action.perPerson ?? 0)
+    if (sts && moveAmt > 0 && (action.type === 'TRANSFER' || action.type === 'SAVINGS_BOOST')) {
+      const after = sts.safe - moveAmt
+      if (after < 0) {
+        warning = { kind: 'over',  headroom: Math.round(after), message: `This leaves you €${Math.abs(Math.round(after))} below safe-to-spend.` }
+      } else if (after < 50) {
+        warning = { kind: 'tight', headroom: Math.round(after), message: `Tight — only €${Math.round(after)} headroom after.` }
+      }
+    }
+
     const entry = {
       id: `act_${Date.now()}`,
       timestamp: new Date(),
       ...action,
       status: 'executing',
       snapshot,
+      warning,
     }
 
     set({ actionLog: [entry, ...actionLog] })

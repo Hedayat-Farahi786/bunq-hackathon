@@ -63,7 +63,10 @@ export function forecastMonth({ transactions = [], totalBalance = 0 } = {}) {
  */
 export function safeToSpend({ transactions = [], totalBalance = 0, accounts = [] } = {}) {
   const now = new Date()
-  const mEnd = endOfMonth(now)
+  // 30-day horizon (not month-end) so a rent payment due 5 days into next
+  // month still counts toward "what's already spoken for". Matches the
+  // server-side affordability engine.
+  const horizon = new Date(now.getTime() + 30 * DAY)
 
   const subs = detectRecurring(transactions)
   let upcomingRecurring = 0
@@ -71,7 +74,7 @@ export function safeToSpend({ transactions = [], totalBalance = 0, accounts = []
   subs.forEach(s => {
     const last = new Date(s.lastDate)
     const nextCharge = new Date(last.getTime() + 30 * DAY)
-    if (nextCharge <= mEnd && nextCharge > now) {
+    if (nextCharge <= horizon && nextCharge > now) {
       upcomingRecurring += s.amount
       upcoming.push({ merchant: s.merchant, amount: s.amount, date: nextCharge })
     }
@@ -83,7 +86,7 @@ export function safeToSpend({ transactions = [], totalBalance = 0, accounts = []
     safe: Math.max(0, Math.round(raw)),
     buffer,
     upcomingRecurring: Math.round(upcomingRecurring),
-    upcoming: upcoming.sort((a, b) => a.date - b.date),
+    upcoming: upcoming.sort((a, b) => new Date(a.date) - new Date(b.date)),
   }
 }
 
@@ -193,6 +196,120 @@ export function fraudRadar({ transactions = [] } = {}) {
     }
   }
   return flagged.sort((a, b) => new Date(b.date) - new Date(a.date))
+}
+
+/**
+ * Bill cliff — earliest *material* upcoming bill. Material means:
+ *   • amount ≥ 20% of current balance AND ≥ €100 (e.g. rent), OR
+ *   • the bill pushes the running balance below the safety buffer.
+ * Otherwise the first upcoming bill is returned with status "covered" so
+ * the dashboard tile still has something useful to render.
+ */
+export function billCliff({ transactions = [], totalBalance = 0, accounts = [] } = {}) {
+  const sts = safeToSpend({ transactions, totalBalance, accounts })
+  const buffer = sts.buffer
+  let running = totalBalance
+  let fallback = null
+  for (const ob of sts.upcoming) {
+    const before = running
+    running = before - Number(ob.amount || 0)
+    const dueIn = Math.max(0, Math.ceil((new Date(ob.date).getTime() - Date.now()) / DAY))
+    const isBig = Number(ob.amount) >= 100 && Number(ob.amount) >= totalBalance * 0.20
+    const isBreach = running < buffer
+    if (isBig || isBreach) {
+      const status = running < 0 ? 'shortfall' : isBreach ? 'tight' : 'covered'
+      return {
+        merchant: ob.merchant,
+        amount:   Math.round(Number(ob.amount) * 100) / 100,
+        dueDate:  ob.date,
+        dueIn,
+        balanceAfter: Math.round(running * 100) / 100,
+        breachAmount: Math.max(0, Math.round((buffer - running) * 100) / 100),
+        status,
+      }
+    }
+    if (!fallback) {
+      fallback = {
+        merchant: ob.merchant,
+        amount:   Math.round(Number(ob.amount) * 100) / 100,
+        dueDate:  ob.date,
+        dueIn,
+        balanceAfter: Math.round(running * 100) / 100,
+        breachAmount: 0,
+        status:   'covered',
+      }
+    }
+  }
+  return fallback
+}
+
+/**
+ * Goal pacing — at user's current monthly surplus split evenly across active
+ * goals, when does each goal hit, and how does that compare to its deadline?
+ */
+export function goalPacing({ transactions = [], goals = [] } = {}) {
+  if (!goals.length) return []
+  const now = new Date()
+  const mStart = startOfMonth(now)
+  const monthIn = transactions.filter(t => t.amount > 0 && new Date(t.date) >= mStart)
+                              .reduce((s, t) => s + t.amount, 0)
+  const monthOut = transactions.filter(t => t.amount < 0 && new Date(t.date) >= mStart)
+                               .reduce((s, t) => s + Math.abs(t.amount), 0)
+  const surplus = Math.max(0, monthIn - monthOut)
+  const active = goals.filter(g => Number(g.current || 0) < Number(g.target || 0))
+  const perGoal = active.length ? surplus / active.length : 0
+
+  return goals.map(g => {
+    const remaining = Math.max(0, Number(g.target) - Number(g.current))
+    const pct = Number(g.target) > 0 ? Math.round((Number(g.current) / Number(g.target)) * 100) : 0
+    if (remaining === 0) return { id: g.id, name: g.name, pct, etaMonths: 0, etaDate: null, lateMonths: 0, deadline: g.deadline || null, status: 'reached' }
+    const etaMonths = perGoal > 0 ? remaining / perGoal : Infinity
+    const etaDate = Number.isFinite(etaMonths) ? new Date(now.getTime() + etaMonths * 30 * DAY) : null
+    let lateMonths = 0, status = 'on-track'
+    if (g.deadline && etaDate) {
+      const dl = new Date(g.deadline)
+      const monthsLate = (etaDate.getTime() - dl.getTime()) / (30 * DAY)
+      if (monthsLate > 1) { lateMonths = Math.round(monthsLate); status = 'late' }
+      else if (monthsLate > -1) status = 'tight'
+    } else if (!Number.isFinite(etaMonths)) {
+      status = 'stalled'
+    }
+    return {
+      id: g.id, name: g.name, pct,
+      remaining: Math.round(remaining),
+      etaMonths: Number.isFinite(etaMonths) ? Math.round(etaMonths * 10) / 10 : null,
+      etaDate:   etaDate ? etaDate.toISOString().slice(0, 10) : null,
+      deadline:  g.deadline || null,
+      lateMonths,
+      status,
+    }
+  })
+}
+
+// Recurring charges you can't cancel — excluded from "subscription bloat"
+// totals so the user doesn't see €854/mo of "subscriptions" when €820 of
+// that is rent.
+const FIXED_OBLIGATIONS_RX = /\b(rent|huur|mortgage|hypothee|electric|stroom|gas|water|insurance|verzeker|t\s?mobile|vodafone|kpn|ziggo|odido|essent|eneco|vattenfall)\b/i
+
+/**
+ * Subscription waste — discretionary recurring only.
+ */
+export function subscriptionWaste({ transactions = [] } = {}) {
+  const subs = detectRecurring(transactions)
+  if (!subs.length) return null
+  const discretionary = subs.filter(s => !FIXED_OBLIGATIONS_RX.test(s.merchant || ''))
+  if (!discretionary.length) return null
+  const totalMonthly = Math.round(discretionary.reduce((s, x) => s + Number(x.amount || 0), 0) * 100) / 100
+  const skippable = /netflix|spotify|disney|youtube|hbo|prime|paramount|apple\s?tv|twitch|patreon|notion|adobe|figma|canva|gym|fitness/i
+  const candidate = discretionary.filter(s => skippable.test(s.merchant) && Number(s.amount) >= 8)
+                                 .sort((a, b) => Number(b.amount) - Number(a.amount))[0] || null
+  const biggest = discretionary.sort((a, b) => Number(b.amount) - Number(a.amount))[0]
+  return {
+    count: discretionary.length,
+    totalMonthly,
+    biggest:   biggest   ? { merchant: biggest.merchant,   amount: Math.round(Number(biggest.amount) * 100) / 100 }   : null,
+    candidate: candidate ? { merchant: candidate.merchant, amount: Math.round(Number(candidate.amount) * 100) / 100 } : null,
+  }
 }
 
 /**

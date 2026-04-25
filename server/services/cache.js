@@ -93,7 +93,7 @@ function hashImage(imageBase64) {
   return createHash('sha256').update(head).update(String(imageBase64.length)).digest('hex').slice(0, 16)
 }
 
-export function buildCacheKey({ provider, userId, userMessage, imageBase64, financialContext, sessionId }) {
+export function buildCacheKey({ provider, userId, userMessage, imageBase64, financialContext, sessionId, judgmentSig }) {
   return createHash('sha256')
     .update(provider || '')
     .update('|')
@@ -106,6 +106,8 @@ export function buildCacheKey({ provider, userId, userMessage, imageBase64, fina
     .update(hashImage(imageBase64))
     .update('|')
     .update(contextFingerprint(financialContext))
+    .update('|')
+    .update(String(judgmentSig || ''))
     .digest('hex')
 }
 

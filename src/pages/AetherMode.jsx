@@ -10,6 +10,7 @@ import {
   ArrowLeft, Loader, RefreshCcw, HelpCircle, X, Camera as CameraIcon, Scan,
   Sparkles, Check, TriangleAlert, Mic, MoreVertical, Volume2, VolumeX,
   SwitchCamera, Keyboard, Send, Zap, Paperclip, ImagePlus, MessageSquarePlus,
+  ArrowLeftRight, Target, Lock, Unlock, ChevronUp, ChevronDown,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -342,6 +343,23 @@ export default function AetherMode() {
   const [activity, setActivity]     = useState(null)
   // Options dropdown (voice / help / flip camera).
   const [optionsOpen, setOptionsOpen] = useState(false)
+  // Reasoning trace collapse — default collapsed on mobile, expanded on
+  // laptop. The user can override per session.
+  const [reasoningOpen, setReasoningOpen] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem('aether_reasoning_open')
+      if (stored === '0') return false
+      if (stored === '1') return true
+    } catch {}
+    return typeof window !== 'undefined' ? window.innerWidth >= 768 : true
+  })
+  const toggleReasoning = useCallback(() => {
+    setReasoningOpen(prev => {
+      const next = !prev
+      try { sessionStorage.setItem('aether_reasoning_open', next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
   const [showHelp, setShowHelp]     = useState(
     () => localStorage.getItem('aether_seen_help') !== '1'
   )
@@ -403,6 +421,47 @@ export default function AetherMode() {
 
   // Warm TTS on mount so the first reply isn't gated on cold DNS/TLS.
   useEffect(() => { prewarmTTS() }, [])
+
+  // While Aether is open: paint the iOS notch + Safari toolbar dark instead of
+  // the app's default white, AND lock the page so phones can't rubber-band /
+  // scroll the host document underneath the fixed Aether layer. Restore on
+  // unmount.
+  useEffect(() => {
+    const themeMeta = document.querySelector('meta[name="theme-color"]')
+    const prevTheme = themeMeta?.getAttribute('content')
+    const prevBodyBg   = document.body.style.backgroundColor
+    const prevHtmlBg   = document.documentElement.style.backgroundColor
+    const prevBodyOver = document.body.style.overflow
+    const prevHtmlOver = document.documentElement.style.overflow
+    const prevBodyPos  = document.body.style.position
+    const prevBodyW    = document.body.style.width
+    const prevBodyH    = document.body.style.height
+    const prevBodyTop  = document.body.style.top
+    const scrollY = window.scrollY
+
+    themeMeta?.setAttribute('content', '#000000')
+    document.body.style.backgroundColor = '#000'
+    document.documentElement.style.backgroundColor = '#000'
+    document.body.style.overflow = 'hidden'
+    document.documentElement.style.overflow = 'hidden'
+    document.body.style.position = 'fixed'
+    document.body.style.width = '100%'
+    document.body.style.height = '100%'
+    document.body.style.top = `-${scrollY}px`
+
+    return () => {
+      if (themeMeta && prevTheme != null) themeMeta.setAttribute('content', prevTheme)
+      document.body.style.backgroundColor = prevBodyBg
+      document.documentElement.style.backgroundColor = prevHtmlBg
+      document.body.style.overflow  = prevBodyOver
+      document.documentElement.style.overflow = prevHtmlOver
+      document.body.style.position  = prevBodyPos
+      document.body.style.width     = prevBodyW
+      document.body.style.height    = prevBodyH
+      document.body.style.top       = prevBodyTop
+      window.scrollTo(0, scrollY)
+    }
+  }, [])
 
   // Unlock Safari speech on first user interaction
   useEffect(() => {
@@ -605,14 +664,24 @@ export default function AetherMode() {
   // based on our own safe-to-spend math. If the user asked a specific
   // question ("should I buy this?"), we ALSO fire a full analyse call so a
   // richer reply follows with real actions attached.
-  const speakProductVerdict = useCallback((product, userQuestion) => {
+  const speakProductVerdict = useCallback((product, userQuestion, opts = {}) => {
     if (!product) return
     const price = Number(product.priceEstimate) || 0
     const aff   = affordabilityFor(price)
     const name  = product.name || 'it'
+    const deferReveal = !!opts.deferReveal
 
-    // Local instant reply.
-    if (speakOn && price > 0) {
+    // Helper: reveal the product card together with whatever state we set
+    // alongside it, so both halves of the response land on the same tick.
+    const revealProduct = () => {
+      setFocusedProduct(product)
+      setDetected(true)
+    }
+
+    // Local instant reply — only when we're NOT deferring the reveal. If we
+    // are deferring, the user is waiting to hear Claude's full answer; a
+    // pre-emptive local one-liner would compete with the real reply.
+    if (!deferReveal && speakOn && price > 0) {
       const line = aff?.level === 'affordable' ? `That's a ${name}… about €${price}. You've got plenty of room for that.`
                  : aff?.level === 'tight'       ? `${name}, around €${price}. You can swing it — just a bit tight this month.`
                  : aff?.level === 'stretch'     ? `Hmm, ${name} at €${price}. That'd be a stretch. Want me to check your savings?`
@@ -625,7 +694,6 @@ export default function AetherMode() {
     }
 
     // Full analyse call so the UI also gets actions (split, save, etc.).
-    // Runs in the background; user hears the local line while this cooks.
     if (userQuestion) {
       const message = `The user is looking at: ${product.brand ? product.brand + ' ' : ''}${name} (estimated €${price}, range €${product.priceLow || price}-€${product.priceHigh || price}).
 
@@ -647,11 +715,45 @@ Answer their actual question with specific numbers from their profile. If the pr
           },
         },
       }).then(result => {
-        if (!result) return
+        if (!result) {
+          if (deferReveal) {
+            revealProduct()
+            setIsAnalyzing(false)
+            setActivity(null)
+          }
+          return
+        }
+        // Speak Claude's reply now (only when we deferred — otherwise the
+        // local one-liner already filled this slot above).
+        if (deferReveal && speakOn && result.voiceResponse) {
+          speak(result.voiceResponse, {
+            onStart: () => setIsSpeaking(true),
+            onEnd:   () => setIsSpeaking(false),
+          })
+        }
+        if (deferReveal) revealProduct()
         setCurrentAnalysis(result)
         const allActions = Array.isArray(result.recommendedActions) ? result.recommendedActions : []
         setActions(allActions)
-      }).catch(err => console.warn('[Aether] identify follow-up failed:', err.message))
+        if (deferReveal) {
+          setIsAnalyzing(false)
+          setActivity(null)
+        }
+      }).catch(err => {
+        console.warn('[Aether] identify follow-up failed:', err.message)
+        if (deferReveal) {
+          // On error still reveal the product card so the user isn't stuck
+          // staring at a viewfinder forever.
+          revealProduct()
+          setIsAnalyzing(false)
+          setActivity(null)
+        }
+      })
+    } else if (deferReveal) {
+      // No question but somehow deferReveal got set — release the hold.
+      revealProduct()
+      setIsAnalyzing(false)
+      setActivity(null)
     }
   }, [speakOn, user, accounts, goals, spendingPatterns, transactions, cardBlocked, sts])
 
@@ -703,21 +805,33 @@ Answer their actual question with specific numbers from their profile. If the pr
         return
       }
 
-      // Got a product — show it IMMEDIATELY and lock
+      // Got a product — lock it. If the user asked a question alongside,
+      // HOLD the product-card reveal until the analyse response lands so
+      // both pop in together (avoids the awkward 3-5s gap on mobile where
+      // the card appears, then the reply card slides in much later).
       if (best && newConf > 0) {
         setProducts([best])
-        setFocusedProduct(best)
         bestConfRef.current = newConf
         bestNameRef.current = best.name
-
-        // Lock right away — no waiting for streaks
-        setDetected(true)
         cancelledRef.current = true
         setIdentifyMode(false)
 
         const pendingQ = pendingIdentifyQRef.current
         pendingIdentifyQRef.current = null
-        speakProductVerdict(best, pendingQ)
+
+        if (pendingQ) {
+          // Defer the product-card reveal — speakProductVerdict will set it
+          // when the /analyse call resolves, so the product card + the
+          // reply card animate in on the same React tick.
+          setIsAnalyzing(true)
+          setActivity('Checking your numbers')
+          speakProductVerdict(best, pendingQ, { deferReveal: true })
+        } else {
+          // No question — reveal immediately as before.
+          setFocusedProduct(best)
+          setDetected(true)
+          speakProductVerdict(best, null)
+        }
         return
       }
     } catch (err) {
@@ -901,15 +1015,20 @@ Answer their actual question with specific numbers from their profile. If the pr
     ?? currentAnalysis?.risk?.level?.toLowerCase()
   const statusInfo = STATUS_COLORS[rawStatus] || null
   const statusMessage = currentAnalysis?.status?.message || currentAnalysis?.risk?.reason
+  // Monochrome Lucide icons inherit `currentColor` from the chip's text colour,
+  // so they always read as buttons rather than colourful stickers.
   const ACTION_ICONS = {
-    PAYMENT_REQUEST: '↗',
-    TRANSFER:        '⇄',
-    SAVINGS_BOOST:   '🎯',
-    BLOCK_CARD:      '🔒',
-    UNBLOCK_CARD:    '🔓',
-    BUDGET_ALERT:    '⚠',
+    PAYMENT_REQUEST: <Send size={11} strokeWidth={2} />,
+    TRANSFER:        <ArrowLeftRight size={11} strokeWidth={2} />,
+    SAVINGS_BOOST:   <Target size={11} strokeWidth={2} />,
+    ROUND_UP_SWEEP:  <Target size={11} strokeWidth={2} />,
+    GOAL_AUTOPILOT:  <Target size={11} strokeWidth={2} />,
+    BLOCK_CARD:      <Lock size={11} strokeWidth={2} />,
+    UNBLOCK_CARD:    <Unlock size={11} strokeWidth={2} />,
+    BUDGET_ALERT:    <TriangleAlert size={11} strokeWidth={2} />,
   }
-  const actionIcon = (type) => ACTION_ICONS[type] || '✦'
+  const actionIcon = (type) => ACTION_ICONS[type] || <Sparkles size={11} strokeWidth={2} />
+
   const shortLabel = (action) => {
     const l = action.label || ''
     return l.replace(/^(Aether can |I can |Let me |Please )/i, '')
@@ -968,7 +1087,7 @@ Answer their actual question with specific numbers from their profile. If the pr
 
         {/* Cancel button */}
         <AnimatePresence>
-          {identifyMode && !detected && (
+          {identifyMode && !detected && !identifying && !isAnalyzing && (
             <motion.button
               key="stop-btn"
               className="identify-stop-btn"
@@ -1301,8 +1420,27 @@ Answer their actual question with specific numbers from their profile. If the pr
             <motion.div key={currentAnalysis.voiceResponse} className="aether-reply"
               initial={{ opacity: 0, y: 6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.97 }}
+              exit={{ opacity: 0, x: 0, scale: 0.97 }}
               transition={{ duration: 0.22 }}
+              /* Swipe-left to dismiss — mobile only. Drag horizontally; if the
+                 user releases past 80px to the LEFT (or with enough leftward
+                 velocity) we clear the analysis. Rightward drags spring back. */
+              drag={isDesktop ? false : 'x'}
+              dragDirectionLock
+              dragConstraints={{ left: 0, right: 0 }}
+              dragElastic={0.6}
+              dragMomentum={false}
+              style={{ touchAction: 'pan-y' }}
+              whileDrag={{ cursor: 'grabbing' }}
+              onDragEnd={(_, info) => {
+                const passed = info.offset.x < -80 || info.velocity.x < -400
+                if (!passed) return
+                setCurrentAnalysis(null)
+                setActions([])
+                clearOverlayHints()
+                stopSpeaking()
+                setIsSpeaking(false)
+              }}
             >
               <div className="reply-header">
                 <span className="reply-orb"><img src="/aether-icon.svg" alt="" className="reply-orb-img" /></span>
@@ -1312,10 +1450,66 @@ Answer their actual question with specific numbers from their profile. If the pr
                     <span className="reply-status-label">{statusInfo.label}</span>
                   </div>
                 )}
+                {currentAnalysis.judgment?.reasoning?.length > 0 && (
+                  <button
+                    className={`reply-reasoning-toggle ${reasoningOpen ? 'open' : ''}`}
+                    onClick={toggleReasoning}
+                    aria-expanded={reasoningOpen}
+                    aria-label={reasoningOpen ? 'Hide reasoning' : 'Show reasoning'}
+                  >
+                    {reasoningOpen ? <ChevronUp size={11} strokeWidth={2.2} /> : <ChevronDown size={11} strokeWidth={2.2} />}
+                    <span>Why</span>
+                  </button>
+                )}
               </div>
               <p className="reply-text">
                 {currentAnalysis.voiceResponse}
               </p>
+              <AnimatePresence initial={false}>
+                {currentAnalysis.judgment?.reasoning?.length > 0 && reasoningOpen && (
+                  <motion.div
+                    key="judgment"
+                    className={`reply-judgment reply-judgment--${currentAnalysis.judgment.verdict || 'general-good'}`}
+                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                    animate={{ opacity: 1, height: 'auto', marginTop: 4 }}
+                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                    transition={{ duration: 0.22 }}
+                  >
+                    <header className="reply-judgment-header">
+                      <span className="reply-judgment-label">The math</span>
+                      <span className="reply-judgment-verdict">
+                        {(() => {
+                          const v = currentAnalysis.judgment.verdict
+                          if (v === 'easy')           return 'Easy'
+                          if (v === 'tight')          return 'Tight'
+                          if (v === 'over')           return 'Over'
+                          if (v === 'general-tight')  return 'Tight'
+                          if (v === 'general-spike')  return 'Spend up'
+                          return 'On track'
+                        })()}
+                      </span>
+                    </header>
+                    <dl className="reply-judgment-rows">
+                      {currentAnalysis.judgment.reasoning.map((row, i) => (
+                        <div
+                          key={`${row.label}-${i}`}
+                          className={[
+                            'reply-judgment-row',
+                            row.emphasise ? 'is-emphasised' : '',
+                            row.tone ? `tone-${row.tone}` : '',
+                          ].filter(Boolean).join(' ')}
+                        >
+                          <dt className="reply-judgment-row-label">{row.label}</dt>
+                          <dd className="reply-judgment-row-value">{row.value}</dd>
+                          {row.detail && (
+                            <span className="reply-judgment-row-detail">{row.detail}</span>
+                          )}
+                        </div>
+                      ))}
+                    </dl>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               {currentAnalysis.insight && (
                 <p className="reply-insight">{currentAnalysis.insight}</p>
               )}

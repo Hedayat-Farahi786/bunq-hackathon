@@ -1,13 +1,20 @@
 /**
  * Claude provider — Anthropic Messages API
- * Model: claude-sonnet-4-6 (best quality for financial reasoning + vision)
+ *
+ * Models in use:
+ *   • claude-sonnet-4-6   → /api/ai/analyse (reasoning-heavy, judgment-aware,
+ *                           multi-turn, JSON-strict). Quality matters here.
+ *   • claude-haiku-4-5    → /api/ai/identify (vision-only product recognition).
+ *                           Cheaper, fast, plenty for "what is this?" tasks.
+ *
  * Docs: https://docs.anthropic.com/en/api/messages
  */
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages'
-const MODEL         = 'claude-sonnet-4-6'
+const ANTHROPIC_API     = 'https://api.anthropic.com/v1/messages'
+export const MODEL_REASON = 'claude-sonnet-4-6'   // analyse / financial judgment
+export const MODEL_VISION = 'claude-haiku-4-5'    // identify / cheap vision recognition
 
-export async function callClaude({ systemPrompt, userMessage, imageBase64, priorTurns = [] }) {
+export async function callClaude({ systemPrompt, userMessage, imageBase64, priorTurns = [], model }) {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!isUsableClaudeKey(apiKey)) {
     throw Object.assign(new Error('Anthropic API key not configured'), { status: 503 })
@@ -34,7 +41,7 @@ export async function callClaude({ systemPrompt, userMessage, imageBase64, prior
   messages.push({ role: 'user', content })
 
   const body = {
-    model:      MODEL,
+    model:      model || MODEL_REASON,
     max_tokens: 2048,
     system:     systemPrompt,
     messages,

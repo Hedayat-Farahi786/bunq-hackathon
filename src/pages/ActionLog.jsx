@@ -168,6 +168,12 @@ export default function ActionLog() {
                         {entry.error && (
                           <p className="logx-err">{entry.error}</p>
                         )}
+                        {entry.warning && (
+                          <p className={`logx-warning logx-warning--${entry.warning.kind}`}>
+                            <AlertTriangle size={11} strokeWidth={2.2} />
+                            {entry.warning.message}
+                          </p>
+                        )}
 
                         {entry.status === 'executing' && entry.hydrated && (
                           <button

@@ -48,6 +48,7 @@ export default function Dashboard() {
     forecast, safeToSpend: sts, balanceSeries,
     getTotalBalance, dispatchAction, sandboxLoaded,
     roundUpPool, theme, setTheme,
+    cliff, pacing, subBloat,
   } = useAetherStore()
 
   const dark = theme !== 'light'
@@ -351,8 +352,81 @@ export default function Dashboard() {
           </motion.button>
         </section>
 
-        {/* ╔══ COLUMN B — INSIGHTS + PLANS + SPENDING ══════╗ */}
+        {/* ╔══ COLUMN B — LOOKING AHEAD + INSIGHTS + SPENDING ══╗ */}
         <section className="db-col db-col-b">
+
+          {/* Looking ahead — predictive panel (the differentiator) */}
+          {sandboxLoaded && (forecast || cliff || subBloat) && (
+            <div className="db-card db-section db-look">
+              <div className="db-section-head">
+                <span className="db-section-title">Looking ahead</span>
+                <span className="db-section-meta">Predictive</span>
+              </div>
+              <div className="db-look-grid">
+
+                {/* Month-end forecast tile with sparkline */}
+                {forecast && forecast.remainingDays >= 0 && (
+                  <div className={`db-look-tile ${forecast.projectedEndBalance < 200 ? 'is-warn' : ''}`}>
+                    <p className="db-look-tile-label">By {format(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0), 'MMM d')}</p>
+                    <p className="db-look-tile-value">
+                      €{fmtEUR(Math.max(0, forecast.projectedEndBalance), 0)}
+                      {forecast.projectedEndBalance < 0 && (
+                        <span className="db-look-tile-neg"> short</span>
+                      )}
+                    </p>
+                    <p className="db-look-tile-sub">
+                      €{forecast.dailyBurn}/d burn · {forecast.remainingDays}d left
+                    </p>
+                    {balanceSeries?.length > 1 && (
+                      <div className="db-look-spark">
+                        <ResponsiveContainer width="100%" height={28}>
+                          <AreaChart data={balanceSeries} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
+                            <defs>
+                              <linearGradient id="lookspark" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="rgba(255,255,255,0.6)" stopOpacity={0.45} />
+                                <stop offset="100%" stopColor="rgba(255,255,255,0.6)" stopOpacity={0} />
+                              </linearGradient>
+                            </defs>
+                            <Area type="monotone" dataKey="balance" stroke="rgba(255,255,255,0.55)" strokeWidth={1.4} fill="url(#lookspark)" dot={false} isAnimationActive={false} />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Bill cliff tile */}
+                {cliff && (
+                  <div className={`db-look-tile db-look-tile--cliff is-${cliff.status}`}>
+                    <p className="db-look-tile-label">Next bill</p>
+                    <p className="db-look-tile-value">€{fmtEUR(cliff.amount, 0)}</p>
+                    <p className="db-look-tile-sub">{cliff.merchant} · in {cliff.dueIn}d</p>
+                    {cliff.status === 'shortfall' && (
+                      <p className="db-look-tile-warn">€{fmtEUR(cliff.breachAmount, 0)} short of buffer</p>
+                    )}
+                    {cliff.status === 'tight' && (
+                      <p className="db-look-tile-warn">drops to €{fmtEUR(cliff.balanceAfter, 0)}</p>
+                    )}
+                    {cliff.status === 'covered' && (
+                      <p className="db-look-tile-ok">covered · €{fmtEUR(cliff.balanceAfter, 0)} after</p>
+                    )}
+                  </div>
+                )}
+
+                {/* Subscription bloat tile */}
+                {subBloat && subBloat.count >= 2 && (
+                  <div className="db-look-tile">
+                    <p className="db-look-tile-label">Subscriptions</p>
+                    <p className="db-look-tile-value">€{fmtEUR(subBloat.totalMonthly, 0)}<span className="db-look-tile-suf">/mo</span></p>
+                    <p className="db-look-tile-sub">{subBloat.count} recurring{subBloat.candidate ? ` · ${subBloat.candidate.merchant} biggest` : ''}</p>
+                    {subBloat.candidate && (
+                      <p className="db-look-tile-warn">drop {subBloat.candidate.merchant}? · save €{fmtEUR(subBloat.candidate.amount, 0)}/mo</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Insights */}
           {insights?.length > 0 && (
@@ -376,36 +450,6 @@ export default function Dashboard() {
                     {ins.action && <ChevronRight size={14} className="db-insight-chevron" />}
                   </motion.button>
                 ))}
-              </div>
-            </div>
-          )}
-
-          {/* Plans (sub-accounts) */}
-          {accounts.length > 0 && (
-            <div className="db-card db-section">
-              <div className="db-section-head">
-                <span className="db-section-title">Plans</span>
-                <span className="db-section-meta">€{fmtEUR(total)} · {accounts.length}</span>
-              </div>
-              <div className="db-plans">
-                {accounts.map((a, i) => {
-                  const c = accountColor(a, i)
-                  const pct = total > 0 ? Math.round((a.balance / total) * 100) : 0
-                  return (
-                    <motion.div key={a.id}
-                      className="db-plan"
-                      style={{ '--c': c }}
-                      initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
-                    >
-                      <div className="db-plan-stripe" />
-                      <div className="db-plan-body">
-                        <span className="db-plan-label">{a.label}</span>
-                        <span className="db-plan-bal">€{fmtEUR(a.balance)}</span>
-                      </div>
-                      <div className="db-plan-pct">{pct}%</div>
-                    </motion.div>
-                  )
-                })}
               </div>
             </div>
           )}
@@ -478,6 +522,13 @@ export default function Dashboard() {
                   const pct = Math.min(100, Math.round((g.current / g.target) * 100))
                   const done = pct >= 100
                   const remaining = Math.max(0, g.target - g.current)
+                  const p = pacing?.find(x => x.id === g.id)
+                  const paceLabel = !p || done ? null
+                    : p.status === 'late'    ? `${p.lateMonths}mo behind`
+                    : p.status === 'stalled' ? 'stalled'
+                    : p.status === 'tight'   ? 'on the line'
+                    : p.etaDate              ? `ETA ${format(new Date(p.etaDate), 'MMM yy')}`
+                                             : null
                   return (
                     <div key={g.id} className={`db-goal ${done ? 'is-done' : ''}`}>
                       <div className="db-goal-head">
@@ -486,6 +537,9 @@ export default function Dashboard() {
                           <span className="db-goal-name">{g.name}</span>
                           <span className="db-goal-sub">
                             {done ? '✓ Reached' : `€${remaining.toLocaleString('nl-NL')} to go`}
+                            {paceLabel && (
+                              <span className={`db-goal-pace is-${p.status}`}>{paceLabel}</span>
+                            )}
                           </span>
                         </div>
                         <span className="db-goal-pct">{pct}%</span>

@@ -5,6 +5,7 @@ import {
   buildCacheKey, cacheLookup, cacheWrite, runWithDedup, shouldCacheResponse,
 } from '../services/cache.js'
 import { recordConversation, buildMemoryBlock, getSessionTurns } from '../services/memory.js'
+import { buildJudgment, judgmentToPromptBlock } from '../services/affordability.js'
 
 export const aiRouter = Router()
 
@@ -54,10 +55,22 @@ aiRouter.post('/analyse', async (req, res, next) => {
     const sid    = (typeof sessionId === 'string' && sessionId.trim()) ? sessionId.trim().slice(0, 64) : null
     const t0 = Date.now()
 
+    // ── 0. Compute the deterministic financial judgment FIRST so it is
+    //      injected into the prompt and also returned with the response.
+    //      This is what stops Claude from inventing safe-to-spend numbers.
+    const judgment = buildJudgment({
+      financialContext,
+      voiceText: userMessage,
+      intent: financialContext?.intent,
+    })
+
     // ── 1. Cache lookup (scoped to session so replies don't leak across tabs) ─
+    //      Include the judgment verdict + requestedAmount in the key so the
+    //      same voice text against different account state still re-runs.
     const cacheKey = buildCacheKey({
       provider: effectiveProvider, userId, userMessage, imageBase64, financialContext,
       sessionId: sid,
+      judgmentSig: `${judgment.verdict}|${judgment.requestedAmount ?? 'none'}|${judgment.safeToSpend}`,
     })
     const cached = await cacheLookup(cacheKey)
     if (cached.hit) {
@@ -77,7 +90,7 @@ aiRouter.post('/analyse', async (req, res, next) => {
         provider: effectiveProvider,
         cached: cached.tier,
         latencyMs: Date.now() - t0,
-        result: cached.response,
+        result: { ...cached.response, judgment },
       })
     }
 
@@ -94,7 +107,10 @@ aiRouter.post('/analyse', async (req, res, next) => {
       userId, financialContext,
       { skipRecentConversations: priorTurns.length > 0 },
     ).catch(() => '')
-    const enrichedMessage = buildEnrichedMessage(userMessage, financialContext, memoryBlock, priorTurns.length)
+    const judgmentBlock = judgmentToPromptBlock(judgment)
+    const enrichedMessage = buildEnrichedMessage(
+      userMessage, financialContext, memoryBlock, priorTurns.length, judgmentBlock,
+    )
 
     // ── 3. Stampede-protected upstream call ─────────────────
     const result = await runWithDedup(cacheKey, () => dispatchAI({
@@ -129,7 +145,7 @@ aiRouter.post('/analyse', async (req, res, next) => {
       provider: effectiveProvider,
       cached: false,
       latencyMs,
-      result,
+      result: { ...result, judgment },
     })
   } catch (err) {
     next(err)
@@ -377,7 +393,7 @@ aiRouter.post('/transcribe', async (req, res) => {
 // Context builder — turns financial state into rich AI context
 // ─────────────────────────────────────────────────────────────
 
-function buildEnrichedMessage(voiceText, ctx, memoryBlock = '', priorTurnsCount = 0) {
+function buildEnrichedMessage(voiceText, ctx, memoryBlock = '', priorTurnsCount = 0, judgmentBlock = '') {
   if (!ctx) return voiceText || 'Analyse the current scene.'
 
   const lines = []
@@ -385,6 +401,13 @@ function buildEnrichedMessage(voiceText, ctx, memoryBlock = '', priorTurnsCount 
   // ── Persistent memory (conversations, traits, merchant overrides) ──
   if (memoryBlock && memoryBlock.trim()) {
     lines.push(memoryBlock.trim())
+    lines.push('')
+  }
+
+  // ── Authoritative financial judgment (deterministic, server-computed) ──
+  // Goes near the top so Claude reads it BEFORE inventing affordability claims.
+  if (judgmentBlock && judgmentBlock.trim()) {
+    lines.push(judgmentBlock.trim())
     lines.push('')
   }
 
