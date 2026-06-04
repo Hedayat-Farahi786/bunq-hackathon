@@ -124,6 +124,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 GEMINI_BASE_URL = os.getenv('GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai/')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
 
+# ---- HD text-to-speech (ElevenLabs) — optional; falls back to browser voice ----
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '')
+ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID', '21m00Tcm4TlvDq8ikWAM')  # "Rachel"
+ELEVENLABS_MODEL = os.getenv('ELEVENLABS_MODEL', 'eleven_turbo_v2_5')
+
 # ---- Integration OAuth credentials, keyed by provider slug ----
 INTEGRATION_OAUTH = {
     'github': {

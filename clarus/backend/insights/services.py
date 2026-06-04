@@ -111,7 +111,32 @@ Each contributor has a unique id. When you mention a contributor, use the format
 Answer in markdown, explain your reasoning, and ground claims in the data."""
 
 
-def build_org_prompt(org, question):
+MAX_HISTORY = 8
+
+
+def _sanitize_history(history):
+    """Keep the last few valid {role, content} turns for conversation memory."""
+    out = []
+    for turn in (history or [])[-MAX_HISTORY:]:
+        role = turn.get('role')
+        content = (turn.get('content') or '').strip()
+        if role in ('user', 'assistant') and content:
+            out.append({'role': role, 'content': content[:4000]})
+    return out
+
+
+def _build_messages(system, context, history, question):
+    """system + grounding context + prior turns + the new question."""
+    return [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': context},
+        {'role': 'assistant', 'content': 'Understood — I have that context. Ask away.'},
+        *_sanitize_history(history),
+        {'role': 'user', 'content': question},
+    ]
+
+
+def build_org_context(org):
     lines = ['## Repositories\n']
     for repo in Repository.objects.filter(organization=org)[:MAX_REPOS]:
         lines.append(f'### {repo.name} (id: {repo.id})')
@@ -128,12 +153,10 @@ def build_org_prompt(org, question):
         if repos:
             lines.append(f'Works on: {repos}')
         lines.append('')
-    lines.append('\n## Question\n')
-    lines.append(question)
     return '\n'.join(lines)
 
 
-def build_twin_prompt(contributor, question):
+def build_twin_context(contributor):
     parts = []
     for work in contributor.works.select_related('repository').all():
         parts.append(f'\nRepository: {work.repository.name} '
@@ -147,8 +170,7 @@ def build_twin_prompt(contributor, question):
                 parts.append(f'  - {kind}: {issue.title}')
     evidence = '\n'.join(parts)[:8000] or '(no recorded activity)'
     profile = contributor.summary or '(no profile yet)'
-    return (f'## Your profile\n{profile}\n\n## Evidence of your work\n{evidence}\n\n'
-            f'## Question for you\n{question}')
+    return f'## Your profile\n{profile}\n\n## Evidence of your work\n{evidence}'
 
 
 def twin_system_prompt(contributor):
@@ -164,18 +186,14 @@ def twin_system_prompt(contributor):
     )
 
 
-def stream_twin_chat(contributor, question):
+def _stream(messages):
     client = get_client()
     if not client:
         yield 'Error: GEMINI_API_KEY is not configured on the server.'
         return
     try:
         stream = client.chat.completions.create(
-            model=settings.GEMINI_MODEL,
-            messages=[{'role': 'system', 'content': twin_system_prompt(contributor)},
-                      {'role': 'user', 'content': build_twin_prompt(contributor, question)}],
-            stream=True,
-        )
+            model=settings.GEMINI_MODEL, messages=messages, stream=True)
         for chunk in stream:
             content = chunk.choices[0].delta.content
             if content:
@@ -184,22 +202,34 @@ def stream_twin_chat(contributor, question):
         yield f'\n\nError contacting the AI model: {e}'
 
 
-def stream_chat(org, question):
-    client = get_client()
-    if not client:
-        yield 'Error: GEMINI_API_KEY is not configured on the server.'
-        return
-    prompt = build_org_prompt(org, question)
+def stream_twin_chat(contributor, question, history=None):
+    messages = _build_messages(
+        twin_system_prompt(contributor), build_twin_context(contributor), history, question)
+    yield from _stream(messages)
+
+
+def stream_chat(org, question, history=None):
+    messages = _build_messages(SYSTEM_PROMPT, build_org_context(org), history, question)
+    yield from _stream(messages)
+
+
+# ------------------------------------------------------------- HD voice (TTS) ----
+def synthesize_speech(text):
+    """Return MP3 bytes from ElevenLabs, or None if not configured/failed."""
+    if not settings.ELEVENLABS_API_KEY:
+        return None
+    import requests
+    url = f'https://api.elevenlabs.io/v1/text-to-speech/{settings.ELEVENLABS_VOICE_ID}'
     try:
-        stream = client.chat.completions.create(
-            model=settings.GEMINI_MODEL,
-            messages=[{'role': 'system', 'content': SYSTEM_PROMPT},
-                      {'role': 'user', 'content': prompt}],
-            stream=True,
+        resp = requests.post(
+            url,
+            headers={'xi-api-key': settings.ELEVENLABS_API_KEY,
+                     'Accept': 'audio/mpeg', 'Content-Type': 'application/json'},
+            json={'text': text[:2500], 'model_id': settings.ELEVENLABS_MODEL,
+                  'voice_settings': {'stability': 0.4, 'similarity_boost': 0.8}},
+            timeout=30,
         )
-        for chunk in stream:
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
-    except Exception as e:  # noqa: BLE001
-        yield f'\n\nError contacting the AI model: {e}'
+        resp.raise_for_status()
+        return resp.content
+    except Exception:  # noqa: BLE001
+        return None

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useNavigate } from 'react-router-dom'
 import { Aperture, ArrowUp, Mic, Square, Volume2, VolumeX } from 'lucide-react'
-import { API_BASE, tokenStore } from '../api/client.js'
+import api, { API_BASE, tokenStore } from '../api/client.js'
 
 // Turn <contributor id="12">Name</contributor> into a markdown link to the profile.
 function normalize(text) {
@@ -43,34 +43,72 @@ export default function Chat({
   const [streaming, setStreaming] = useState(false)
   const [listening, setListening] = useState(false)
   const [speakOn, setSpeakOn] = useState(false)
+  const [hdVoice, setHdVoice] = useState(false)
   const bottomRef = useRef(null)
   const recRef = useRef(null)
   const transcriptRef = useRef('')
   const speakOnRef = useRef(false)
+  const hdRef = useRef(false)
+  const audioRef = useRef(null)
   const navigate = useNavigate()
 
   useEffect(() => { speakOnRef.current = speakOn }, [speakOn])
+  useEffect(() => { hdRef.current = hdVoice }, [hdVoice])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
-  useEffect(() => () => {   // cleanup on unmount
+  useEffect(() => {   // detect HD voice availability
+    api.get('/insights/config/').then(({ data }) => setHdVoice(!!data.hd_voice)).catch(() => {})
+  }, [])
+  useEffect(() => () => stopAudio(), [])   // cleanup on unmount
+
+  const stopAudio = () => {
     try { recRef.current?.abort?.() } catch { /* noop */ }
     if (canSpeak) window.speechSynthesis.cancel()
-  }, [])
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+  }
 
-  const speak = (text) => {
-    if (!speakOnRef.current || !canSpeak) return
+  const speakBrowser = (text) => {
+    if (!canSpeak) return
+    window.speechSynthesis.cancel()
+    const u = new SpeechSynthesisUtterance(text)
+    u.rate = 1.05
+    window.speechSynthesis.speak(u)
+  }
+
+  const speak = async (text) => {
+    if (!speakOnRef.current) return
     const clean = forSpeech(text)
     if (!clean) return
-    window.speechSynthesis.cancel()
-    const u = new SpeechSynthesisUtterance(clean)
-    u.rate = 1.05
-    u.pitch = 1
-    window.speechSynthesis.speak(u)
+    stopAudio()
+    if (hdRef.current) {   // HD voice via backend (ElevenLabs)
+      try {
+        const res = await fetch(`${API_BASE}/api/insights/tts/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenStore.access}`,
+            'X-Org-Slug': tokenStore.org || '',
+          },
+          body: JSON.stringify({ text: clean }),
+        })
+        if (res.ok) {
+          const url = URL.createObjectURL(await res.blob())
+          const audio = new Audio(url)
+          audioRef.current = audio
+          audio.onended = () => URL.revokeObjectURL(url)
+          await audio.play()
+          return
+        }
+      } catch { /* fall through to browser voice */ }
+    }
+    speakBrowser(clean)
   }
 
   const ask = async (question) => {
     if (!question || streaming) return
     setInput('')
-    if (canSpeak) window.speechSynthesis.cancel()
+    stopAudio()
+    // conversation memory: send completed turns so far
+    const history = messages.filter((m) => m.text).map((m) => ({ role: m.role, content: m.text }))
     setMessages((m) => [...m, { role: 'user', text: question }, { role: 'assistant', text: '' }])
     setStreaming(true)
     try {
@@ -81,7 +119,7 @@ export default function Chat({
           Authorization: `Bearer ${tokenStore.access}`,
           'X-Org-Slug': tokenStore.org || '',
         },
-        body: JSON.stringify({ prompt: question }),
+        body: JSON.stringify({ prompt: question, history }),
       })
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -138,7 +176,7 @@ export default function Chat({
   const toggleSpeak = () => {
     const next = !speakOn
     setSpeakOn(next)
-    if (!next && canSpeak) window.speechSynthesis.cancel()
+    if (!next) stopAudio()
   }
 
   return (
@@ -147,10 +185,12 @@ export default function Chat({
         <div className="flex items-center gap-2 text-sm font-semibold">
           <Aperture className="h-4 w-4 text-[var(--color-accent)]" strokeWidth={2.2} /> {title}
         </div>
-        {voice && canSpeak && (
-          <button onClick={toggleSpeak} title={speakOn ? 'Mute spoken replies' : 'Speak replies aloud'}
-            className={`btn rounded-lg p-1.5 ${speakOn ? 'text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'text-[var(--color-muted)] hover:bg-[var(--color-canvas)]'}`}>
+        {voice && (canSpeak || hdVoice) && (
+          <button onClick={toggleSpeak}
+            title={speakOn ? 'Mute spoken replies' : 'Speak replies aloud'}
+            className={`btn inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium ${speakOn ? 'text-[var(--color-accent)] bg-[var(--color-accent-soft)]' : 'text-[var(--color-muted)] hover:bg-[var(--color-canvas)]'}`}>
             {speakOn ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+            {hdVoice && <span>HD</span>}
           </button>
         )}
       </div>
