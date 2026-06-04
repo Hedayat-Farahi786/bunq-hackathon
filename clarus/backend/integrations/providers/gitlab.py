@@ -50,6 +50,24 @@ class GitLabProvider(Provider):
             'account_id': str(identity.get('id', '')),
         }
 
+    # ---- Repository discovery ----
+    def list_repositories(self, connection) -> list[dict]:
+        token = connection.access_token
+        if not token:
+            raise ProviderError('GitLab connection has no access token.')
+        headers = {'Authorization': f'Bearer {token}'}
+        projects = self._paginate(
+            f'{API}/projects', headers,
+            params={'membership': 'true', 'order_by': 'last_activity_at'}, limit=300)
+        return [{
+            'external_id': str(p['id']),
+            'name': p.get('path_with_namespace', p.get('name', '')),
+            'private': p.get('visibility', 'private') != 'public',
+            'description': p.get('description') or '',
+            'url': p.get('web_url', ''),
+            'pushed_at': p.get('last_activity_at'),
+        } for p in projects]
+
     # ---- Ingestion ----
     def ingest(self, connection, sink) -> None:
         token = connection.access_token

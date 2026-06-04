@@ -91,3 +91,13 @@ class Provider:
         raise NotImplementedError(
             f'Ingestion for {self.name} is not implemented yet.'
         )
+
+    # ---- Repository discovery (for the in-app picker) ----
+    def list_repositories(self, connection) -> list[dict]:
+        """Return repos the connected account can access.
+
+        Each item: {external_id, name, private, description, url, pushed_at}.
+        """
+        raise NotImplementedError(
+            f'Repository listing for {self.name} is not implemented yet.'
+        )

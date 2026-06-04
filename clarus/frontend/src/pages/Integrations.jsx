@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-  CheckCircle2, Circle, AlertCircle, Loader2, Plus, Trash2, Play, X,
+  CheckCircle2, Circle, AlertCircle, Loader2, Plus, Trash2, ListChecks, X,
 } from 'lucide-react'
 import api from '../api/client.js'
+import RepoPicker from '../components/RepoPicker.jsx'
 
 const BRAND = {
   github: { label: 'GH', bg: '#0a0a0a' },
@@ -15,7 +16,7 @@ const BRAND = {
 export default function Integrations() {
   const [providers, setProviders] = useState([])
   const [runs, setRuns] = useState([])
-  const [targets, setTargets] = useState({})
+  const [picker, setPicker] = useState(null)   // provider object whose picker is open
   const [notice, setNotice] = useState(null)
   const [params, setParams] = useSearchParams()
 
@@ -50,27 +51,19 @@ export default function Integrations() {
     return () => clearInterval(t)
   }, [runs])
 
-  const parseTargets = (slug) =>
-    (targets[slug] || '').split(',').map((s) => s.trim()).filter(Boolean)
-
   const connect = async (slug) => {
     try {
-      const { data } = await api.post(`/integrations/${slug}/connect/`, { targets: parseTargets(slug) })
+      const { data } = await api.post(`/integrations/${slug}/connect/`, {})
       window.location.href = data.authorize_url
     } catch (err) {
       setNotice({ type: 'err', msg: err.response?.data?.detail || 'Could not start OAuth.' })
     }
   }
   const disconnect = async (slug) => { await api.delete(`/integrations/${slug}/`); load() }
-  const ingest = async (slug) => {
-    try {
-      await api.post(`/ingestion/${slug}/run/`, { targets: parseTargets(slug) })
-      setNotice({ type: 'ok', msg: `Ingestion started for ${slug}.` })
-      const { data } = await api.get('/ingestion/runs/')
-      setRuns(data)
-    } catch (err) {
-      setNotice({ type: 'err', msg: err.response?.data?.detail || 'Could not start ingestion.' })
-    }
+  const onIngested = async () => {
+    setNotice({ type: 'ok', msg: 'Ingestion started — building your org lens.' })
+    const { data } = await api.get('/ingestion/runs/')
+    setRuns(data)
   }
 
   return (
@@ -110,15 +103,6 @@ export default function Integrations() {
               <StatusPill p={p} />
             </div>
 
-            {(p.slug === 'github' || p.slug === 'gitlab') && (
-              <input
-                placeholder="Targets: owner or owner/repo (comma-separated, optional)"
-                value={targets[p.slug] || ''}
-                onChange={(e) => setTargets((t) => ({ ...t, [p.slug]: e.target.value }))}
-                className="mt-4 w-full rounded-xl border border-[var(--color-line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--color-accent)] focus:ring-4 focus:ring-[var(--color-accent-soft)]"
-              />
-            )}
-
             <div className="mt-4 flex flex-wrap items-center gap-2">
               {!p.connected && (
                 <button disabled={!p.configured} onClick={() => connect(p.slug)}
@@ -127,9 +111,9 @@ export default function Integrations() {
                 </button>
               )}
               {p.connected && p.ingestion_ready && (
-                <button onClick={() => ingest(p.slug)}
+                <button onClick={() => setPicker(p)}
                   className="btn inline-flex items-center gap-1.5 rounded-xl bg-[var(--color-accent)] px-3.5 py-2 text-sm font-medium text-white hover:brightness-95">
-                  <Play className="h-4 w-4" /> Ingest now
+                  <ListChecks className="h-4 w-4" /> Select repositories
                 </button>
               )}
               {p.connected && !p.ingestion_ready && (
@@ -165,6 +149,10 @@ export default function Integrations() {
           </div>
         ))}
       </div>
+
+      {picker && (
+        <RepoPicker provider={picker} onClose={() => setPicker(null)} onIngested={onIngested} />
+      )}
     </div>
   )
 }

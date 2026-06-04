@@ -22,10 +22,16 @@ class TriggerIngestionView(APIView):
         if not connection:
             return Response({'detail': f'No active {slug} connection.'}, status=400)
 
-        # Optionally update ingest targets (e.g. which orgs/repos) before running.
+        # Optionally update ingest scope (selected repos + public-only) first.
         targets = request.data.get('targets')
+        public_only = request.data.get('public_only')
+        meta = dict(connection.metadata or {})
         if targets is not None:
-            connection.metadata = {**(connection.metadata or {}), 'targets': targets}
+            meta['targets'] = targets
+        if public_only is not None:
+            meta['public_only'] = bool(public_only)
+        if meta != (connection.metadata or {}):
+            connection.metadata = meta
             connection.save(update_fields=['metadata'])
 
         run = IngestionRun.objects.create(

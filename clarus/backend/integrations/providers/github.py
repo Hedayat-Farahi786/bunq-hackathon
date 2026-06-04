@@ -54,6 +54,26 @@ class GitHubProvider(Provider):
             'account_id': str(identity.get('id', '')),
         }
 
+    # ---- Repository discovery ----
+    def list_repositories(self, connection) -> list[dict]:
+        token = connection.access_token
+        if not token:
+            raise ProviderError('GitHub connection has no access token.')
+        headers = self._headers(token)
+        repos = self._paginate(
+            f'{API}/user/repos', headers,
+            params={'affiliation': 'owner,organization,collaborator', 'sort': 'pushed'},
+            limit=300,
+        )
+        return [{
+            'external_id': str(r['id']),
+            'name': r['full_name'],
+            'private': bool(r.get('private')),
+            'description': r.get('description') or '',
+            'url': r.get('html_url', ''),
+            'pushed_at': r.get('pushed_at'),
+        } for r in repos]
+
     # ---- Ingestion ----
     def ingest(self, connection, sink) -> None:
         token = connection.access_token
@@ -62,6 +82,9 @@ class GitHubProvider(Provider):
         headers = self._headers(token)
         targets = connection.metadata.get('targets') or []
         repos = self._resolve_repos(headers, targets, connection.account_login)
+        # When no explicit selection, honour the public-only guard (default on).
+        if not targets and connection.metadata.get('public_only', True):
+            repos = [r for r in repos if not r.get('private')]
         sink.log(f'Found {len(repos)} repositories to ingest.')
 
         for repo_json in repos[:MAX_REPOS]:

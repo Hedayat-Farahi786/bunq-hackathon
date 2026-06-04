@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from accounts.permissions import resolve_organization
 
 from .models import Connection, OAuthState
-from .providers import ProviderError, all_providers, get_provider_class
+from .providers import ProviderError, all_providers, get_provider, get_provider_class
 from .serializers import ConnectionSerializer
 
 
@@ -124,3 +124,26 @@ class ConnectionListView(APIView):
         org = resolve_organization(request)
         conns = Connection.objects.filter(organization=org)
         return Response(ConnectionSerializer(conns, many=True).data)
+
+
+class AvailableRepositoriesView(APIView):
+    """List the repos the connected account can access, for the picker."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, slug):
+        org = resolve_organization(request)
+        conn = Connection.objects.filter(
+            organization=org, provider=slug, status=Connection.Status.ACTIVE).first()
+        if not conn:
+            return Response({'detail': f'No active {slug} connection.'}, status=400)
+        try:
+            provider = get_provider(slug)
+            repos = provider.list_repositories(conn)
+        except NotImplementedError:
+            return Response({'detail': f'{slug} does not support repository listing yet.'}, status=400)
+        except Exception as e:  # noqa: BLE001
+            return Response({'detail': f'Failed to list repositories: {e}'}, status=502)
+        selected = set((conn.metadata or {}).get('targets') or [])
+        for r in repos:
+            r['selected'] = r['name'] in selected
+        return Response({'repositories': repos, 'selected': list(selected)})
