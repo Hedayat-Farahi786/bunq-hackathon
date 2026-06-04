@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import { ArrowLeft, ExternalLink, Sparkles, GitCommit, GitPullRequest, CircleDot } from 'lucide-react'
 import api from '../api/client.js'
 import Avatar from '../components/Avatar.jsx'
+import Chat from '../components/Chat.jsx'
 
 export default function ContributorDetail() {
   const { id } = useParams()
@@ -38,6 +39,24 @@ export default function ContributorDetail() {
           <div className="prose prose-sm max-w-none text-[var(--color-ink)]"><ReactMarkdown>{c.summary}</ReactMarkdown></div>
         </div>
       )}
+
+      <div className="mt-8">
+        <div className="mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--color-ink-soft)]">
+          <Sparkles className="h-4 w-4 text-[var(--color-accent)]" /> Digital twin
+        </div>
+        <p className="mb-3 text-xs text-[var(--color-muted)]">
+          Chat with an AI grounded in {c.display_name || c.username}'s work — get context before reaching out.
+        </p>
+        <div className="h-[460px]">
+          <Chat
+            endpoint={`/api/insights/contributors/${c.id}/chat/`}
+            title={`${c.display_name || c.username}'s digital twin`}
+            placeholder={`Ask ${c.display_name || c.username} anything…`}
+            intro={`I'm ${c.display_name || c.username}'s digital twin, built from their work. Ask me what I know.`}
+            suggestions={['What are you most experienced with?', 'Could you help with the frontend?']}
+          />
+        </div>
+      </div>
 
       <h2 className="mt-8 text-sm font-semibold text-[var(--color-ink-soft)]">Work by repository</h2>
       <div className="mt-3 space-y-3">

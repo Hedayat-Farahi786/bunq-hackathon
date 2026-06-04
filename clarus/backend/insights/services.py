@@ -133,6 +133,57 @@ def build_org_prompt(org, question):
     return '\n'.join(lines)
 
 
+def build_twin_prompt(contributor, question):
+    parts = []
+    for work in contributor.works.select_related('repository').all():
+        parts.append(f'\nRepository: {work.repository.name} '
+                     f'({work.commit_count} commits, {work.pr_count} PRs, {work.issue_count} issues)')
+        for commit in work.commits.all()[:10]:
+            if commit.message:
+                parts.append(f'  - commit: {commit.message}')
+        for issue in work.issues.all()[:6]:
+            if issue.title:
+                kind = 'PR' if issue.is_pull_request else 'issue'
+                parts.append(f'  - {kind}: {issue.title}')
+    evidence = '\n'.join(parts)[:8000] or '(no recorded activity)'
+    profile = contributor.summary or '(no profile yet)'
+    return (f'## Your profile\n{profile}\n\n## Evidence of your work\n{evidence}\n\n'
+            f'## Question for you\n{question}')
+
+
+def twin_system_prompt(contributor):
+    name = contributor.display_name or contributor.username
+    return (
+        f"You are the AI 'digital twin' of {name}, a software contributor. "
+        f"You are built from {name}'s actual work — commits, issues and pull "
+        f"requests. Answer in the first person as {name}, grounded strictly in "
+        f"the evidence of your work provided. Be concrete about the components, "
+        f"technologies and areas you've worked on. If a question goes beyond what "
+        f"your work shows, say you're not certain rather than inventing details. "
+        f"Keep replies concise and in markdown."
+    )
+
+
+def stream_twin_chat(contributor, question):
+    client = get_client()
+    if not client:
+        yield 'Error: GEMINI_API_KEY is not configured on the server.'
+        return
+    try:
+        stream = client.chat.completions.create(
+            model=settings.GEMINI_MODEL,
+            messages=[{'role': 'system', 'content': twin_system_prompt(contributor)},
+                      {'role': 'user', 'content': build_twin_prompt(contributor, question)}],
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
+    except Exception as e:  # noqa: BLE001
+        yield f'\n\nError contacting the AI model: {e}'
+
+
 def stream_chat(org, question):
     client = get_client()
     if not client:
